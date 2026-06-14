@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Luma SF Agent</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Luma SF Agent</h1>
+      <p class="subtitle">Auto-fill only — you submit</p>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="profile">Profile</button>
+      <button class="tab" data-tab="queue">Queue</button>
+      <button class="tab" data-tab="settings">Settings</button>
+    </nav>
+
+    <section id="profile-panel" class="panel active">
+      <p class="hint">Works on lu.ma and luma.com — including popup registration forms (URL stays the same).</p>
+      <form id="profile-form"></form>
+      <button type="submit" form="profile-form" class="primary">Save profile</button>
+      <button type="button" id="fill-now" class="secondary">Fill this page now</button>
+      <p id="fill-status" class="status"></p>
+    </section>
+
+    <section id="queue-panel" class="panel">
+      <div class="actions">
+        <button id="scan-sf" class="primary">Scan SF events</button>
+        <button id="start-queue" class="secondary">Fill queued pages</button>
+        <button id="stop-queue" class="danger">Stop</button>
+      </div>
+      <p id="queue-status" class="status"></p>
+      <ul id="queue-list"></ul>
+    </section>
+
+    <section id="settings-panel" class="panel">
+      <form id="settings-form">
+        <label class="checkbox">
+          <input type="checkbox" name="freeOnly" checked />
+          Free events only
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" name="autoFillOnPage" checked />
+          Auto-fill empty fields on any Luma page
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" name="aiAnswerQuestions" checked />
+          Smart answers per question (Chrome on-device AI SLM)
+        </label>
+        <p class="hint block">Uses Gemini Nano in Chrome when available. Each question gets a different tailored answer. Falls back to smart rules if SLM is unavailable — no API key needed.</p>
+        <label>
+          Gemini API key (optional backup)
+          <input type="password" name="geminiApiKey" placeholder="From aistudio.google.com/apikey" autocomplete="off" />
+        </label>
+        <label>
+          Gemini model (API backup)
+          <select name="geminiModel">
+            <option value="gemini-2.0-flash">gemini-2.0-flash (fast)</option>
+            <option value="gemini-1.5-pro">gemini-1.5-pro</option>
+          </select>
+        </label>
+        <button type="button" id="check-ai" class="secondary">Check Gemini availability</button>
+        <p id="ai-status" class="status"></p>
+        <hr class="divider" />
+        <label>
+          Delay between registrations (ms)
+          <input type="number" name="delayBetweenMs" min="1000" step="500" value="3000" />
+        </label>
+      </form>
+      <button type="submit" form="settings-form" class="primary">Save settings</button>
+    </section>
+
+    <footer>
+      <p>Tip: Log into <a href="https://lu.ma" target="_blank">lu.ma</a> first. This extension only fills fields — you submit yourself.</p>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
