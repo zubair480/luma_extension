@@ -480,11 +480,195 @@ export function compareEligibleEvents(a, b) {
 }
 
 /**
- * `hooks` lets the caller consume results while verification is still running:
- *   onEvent(event)     — called for every verified event that is registerable and not in history
- *   onProgress(info)   — awaited after every lookup ({ verified, total, found, ready, cacheHit })
- *   shouldStop()       — return true to end the pass early (user pressed Stop)
- * The return value is unchanged, so callers that only want the final list are unaffected.
+ * Streaming verifier — the middle stage of the discovery pipeline.
+ *
+ * Sources push links in as they find them; the verifier checks each against the Luma API on the
+ * shared rate-limited lane and hands every registerable event to `hooks.onEvent` the moment it
+ * is confirmed. Links are taken round-robin across sources, so a source that arrives late or
+ * contributes many links cannot crowd out the others, and the ranking position (`sourceOrder`)
+ * is the interleaved take position exactly as before.
+ *
+ *   push(records)  add scraped links; deduped by slug across every push
+ *   finish()       no more sources will push; the pass ends once the backlog drains
+ *   stop()         end the pass now (user pressed Stop)
+ *   done           resolves to { events, stats } — the same shape discoverScrapedEventsWithStats returns
+ *   state          live counters: links, verified, ready, cacheHits, rateLimitStopped, finished, stopped
+ */
+export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(), hooks = {} } = {}) {
+  const buckets = new Map();
+  const seen = new Set();
+  const hydrated = [];
+  const lookupCounts = { event: 0, not_event: 0, ineligible: 0, unavailable: 0 };
+  const state = {
+    finished: false,
+    stopped: false,
+    links: 0,
+    verified: 0,
+    ready: 0,
+    cacheHits: 0,
+    rateLimitRetries: 0,
+    rateLimitStopped: false,
+  };
+  const verifiedTarget = maxResults + Math.max(8, Math.ceil(maxResults / 3));
+  let takeIndex = 0;
+  let cursor = 0;
+  let wake = null;
+
+  const hasWork = () => [...buckets.values()].some((bucket) => bucket.length > 0);
+  const notify = () => {
+    if (!wake) return;
+    const resolve = wake;
+    wake = null;
+    resolve();
+  };
+  const waitForWork = () =>
+    new Promise((resolve) => {
+      wake = resolve;
+      if (hasWork() || state.finished || state.stopped) {
+        wake = null;
+        resolve();
+      }
+    });
+
+  function push(records = []) {
+    for (const record of normalizeScrapedEventLinks(records)) {
+      if (seen.has(record.slug)) continue;
+      seen.add(record.slug);
+      const key = record.source || "scraped";
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(record);
+      state.links++;
+    }
+    notify();
+  }
+
+  function takeNext() {
+    const keys = [...buckets.keys()];
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[(cursor + i) % keys.length];
+      const bucket = buckets.get(key);
+      if (!bucket.length) continue;
+      cursor = (cursor + i + 1) % keys.length;
+      return { ...bucket.shift(), sourceOrder: takeIndex++ };
+    }
+    return null;
+  }
+
+  function finish() {
+    state.finished = true;
+    notify();
+  }
+
+  function stop() {
+    state.stopped = true;
+    notify();
+  }
+
+  const done = (async () => {
+    await loadLookupCache();
+
+    while (!state.stopped) {
+      if (typeof hooks.shouldStop === "function" && hooks.shouldStop()) break;
+      if (state.verified >= MAX_FEED_HYDRATE) break;
+      // Enough verified, registerable inventory for this run — stop spending requests.
+      if (state.ready >= verifiedTarget) break;
+
+      const record = takeNext();
+      if (!record) {
+        if (state.finished) break;
+        await waitForWork();
+        continue;
+      }
+
+      const cached = readLookupCache(record.slug);
+      const lookup = cached || (await fetchEventLookupBySlug(record.slug));
+      if (cached) state.cacheHits++;
+      else writeLookupCache(record.slug, lookup);
+
+      state.verified++;
+      lookupCounts[lookup.status] = (lookupCounts[lookup.status] || 0) + 1;
+      state.rateLimitRetries += lookup.rateLimitRetries || 0;
+
+      if (lookup.status === "event") {
+        const event = {
+          ...lookup.event,
+          source: record.source,
+          sources: record.sources,
+          sourceOrder: record.sourceOrder,
+        };
+        hydrated.push(event);
+
+        const [scored] = applyScores([event]);
+        if (scored && isRegisterable(scored) && !isExcludedFromHistory(scored, excludeIds)) {
+          state.ready++;
+          if (typeof hooks.onEvent === "function") {
+            try {
+              hooks.onEvent(scored);
+            } catch {
+              /* consumer errors must not stop verification */
+            }
+          }
+        }
+      }
+
+      if (typeof hooks.onProgress === "function") {
+        try {
+          await hooks.onProgress({
+            verified: state.verified,
+            total: state.links,
+            found: hydrated.length,
+            ready: state.ready,
+            cacheHit: Boolean(cached),
+            slug: record.slug,
+            finished: state.finished,
+          });
+        } catch {
+          /* progress reporting is best-effort */
+        }
+      }
+
+      if (lookup.httpStatus === 429) {
+        state.rateLimitStopped = true;
+        break;
+      }
+    }
+
+    const eligible = applyScores(hydrated)
+      .filter(isRegisterable)
+      .filter((event) => !isExcludedFromHistory(event, excludeIds));
+    eligible.sort(compareEligibleEvents);
+
+    await flushLookupCache();
+
+    const registerable = hydrated.filter(isRegisterable);
+    return {
+      events: eligible.slice(0, maxResults),
+      stats: {
+        totalSF: state.links,
+        totalScraped: state.links,
+        lookupAttempted: Object.values(lookupCounts).reduce((sum, count) => sum + count, 0),
+        cacheHits: state.cacheHits,
+        hydrated: hydrated.length,
+        rejectedNonEvents: lookupCounts.not_event,
+        rejectedIneligible: lookupCounts.ineligible,
+        lookupFailed: lookupCounts.unavailable,
+        rateLimitRetries: state.rateLimitRetries,
+        rateLimitStopped: state.rateLimitStopped,
+        pageCheckRequired: 0,
+        freeRegisterable: registerable.length,
+        newRegisterable: eligible.length,
+        techRegisterable: eligible.filter((e) => e.relevanceScore >= MIN_RELEVANCE_SCORE).length,
+        aiRegisterable: eligible.filter((e) => e.relevanceScore >= MIN_RELEVANCE_SCORE).length,
+      },
+    };
+  })();
+
+  return { push, finish, stop, done, state };
+}
+
+/**
+ * One-shot form of the verifier: verify a fixed list of scraped links. Same round-robin order,
+ * same cap, same return shape — kept for callers and tests that already have every link.
  */
 export async function discoverScrapedEventsWithStats(
   records = [],
@@ -492,111 +676,10 @@ export async function discoverScrapedEventsWithStats(
   excludeIds = new Set(),
   hooks = {}
 ) {
-  await loadLookupCache();
-  const allNormalized = normalizeScrapedEventLinks(records);
-  // Re-key sourceOrder to the interleaved position. normalizeScrapedEventLinks numbers records in
-  // the order sources were concatenated, which would make the final sort prefer whichever source
-  // was scanned first and starve the later ones — badly so once one source contributes many more
-  // links than the others. Ranking on the round-robin position keeps every source represented.
-  const normalized = interleaveRecordsBySource(allNormalized)
-    .slice(0, MAX_FEED_HYDRATE)
-    .map((record, index) => ({ ...record, sourceOrder: index }));
-  const hydrated = [];
-  const lookupCounts = { event: 0, not_event: 0, ineligible: 0, unavailable: 0 };
-  let cacheHits = 0;
-  let rateLimitRetries = 0;
-  let rateLimitStopped = false;
-  const verifiedTarget = Math.min(normalized.length, maxResults + Math.max(8, Math.ceil(maxResults / 3)));
-
-  let ready = 0;
-  for (let index = 0; index < normalized.length; index++) {
-    const record = normalized[index];
-    if (typeof hooks.shouldStop === "function" && hooks.shouldStop()) break;
-
-    const cached = readLookupCache(record.slug);
-    const lookup = cached || (await fetchEventLookupBySlug(record.slug));
-    if (cached) cacheHits++;
-    else writeLookupCache(record.slug, lookup);
-
-    lookupCounts[lookup.status] = (lookupCounts[lookup.status] || 0) + 1;
-    rateLimitRetries += lookup.rateLimitRetries || 0;
-
-    if (lookup.status === "event") {
-      const event = {
-        ...lookup.event,
-        source: record.source,
-        sources: record.sources,
-        sourceOrder: record.sourceOrder,
-      };
-      hydrated.push(event);
-
-      if (typeof hooks.onEvent === "function") {
-        const [scored] = applyScores([event]);
-        if (scored && isRegisterable(scored) && !isExcludedFromHistory(scored, excludeIds)) {
-          ready++;
-          try {
-            hooks.onEvent(scored);
-          } catch {
-            /* consumer errors must not stop verification */
-          }
-        }
-      }
-    }
-
-    if (typeof hooks.onProgress === "function") {
-      try {
-        await hooks.onProgress({
-          verified: index + 1,
-          total: normalized.length,
-          found: hydrated.length,
-          ready,
-          cacheHit: Boolean(cached),
-          slug: record.slug,
-        });
-      } catch {
-        /* progress reporting is best-effort */
-      }
-    }
-
-    if (lookup.httpStatus === 429) {
-      rateLimitStopped = true;
-      break;
-    }
-
-    // Stop making lookups once there is enough verified, registerable inventory for this run.
-    // Source records are interleaved, so this remains representative of all configured pages.
-    if (hydrated.filter(isRegisterable).length >= verifiedTarget) break;
-  }
-
-  const eligible = applyScores(hydrated)
-    .filter(isRegisterable)
-    .filter((event) => !isExcludedFromHistory(event, excludeIds));
-
-  eligible.sort(compareEligibleEvents);
-
-  await flushLookupCache();
-
-  const registerable = hydrated.filter(isRegisterable);
-  return {
-    events: eligible.slice(0, maxResults),
-    stats: {
-      totalSF: allNormalized.length,
-      totalScraped: allNormalized.length,
-      lookupAttempted: Object.values(lookupCounts).reduce((sum, count) => sum + count, 0),
-      cacheHits,
-      hydrated: hydrated.length,
-      rejectedNonEvents: lookupCounts.not_event,
-      rejectedIneligible: lookupCounts.ineligible,
-      lookupFailed: lookupCounts.unavailable,
-      rateLimitRetries,
-      rateLimitStopped,
-      pageCheckRequired: 0,
-      freeRegisterable: registerable.length,
-      newRegisterable: eligible.length,
-      techRegisterable: eligible.filter((e) => e.relevanceScore >= MIN_RELEVANCE_SCORE).length,
-      aiRegisterable: eligible.filter((e) => e.relevanceScore >= MIN_RELEVANCE_SCORE).length,
-    },
-  };
+  const verifier = createStreamingVerifier({ maxResults, excludeIds, hooks });
+  verifier.push(records);
+  verifier.finish();
+  return verifier.done;
 }
 
 async function fetchPage({ query = "", cursor = null, limit = 40, category = null } = {}) {

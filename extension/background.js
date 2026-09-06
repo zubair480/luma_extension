@@ -1,4 +1,4 @@
-import { discoverScrapedEventsWithStats, compareEligibleEvents } from "./lib/discovery.js";
+import { createStreamingVerifier, compareEligibleEvents } from "./lib/discovery.js";
 import {
   discoverFoundersClubEvents,
   FOUNDERS_CLUB_HOME_URL,
@@ -34,6 +34,7 @@ import {
   TAB_TIMEOUT_MS,
   isValidEventHref,
   isWomenOnlyEvent,
+  isValidEventSlug,
 } from "./lib/constants.js";
 import "./dev-reload.js";
 
@@ -857,15 +858,41 @@ async function nextPrefetchCandidate(queue) {
   return null;
 }
 
+/**
+ * A source tab that has finished scanning becomes the work tab (if none yet) or the preload slot,
+ * so the run never opens a tab it could have reused.
+ */
+async function adoptTabIntoPool(tabId) {
+  if (!tabId) return;
+  if (!tabPool.workTabId) {
+    tabPool.workTabId = tabId;
+    await setSessionRunControl({ workTabId: tabId });
+    return;
+  }
+  if (!tabPool.prefetchTabId) {
+    tabPool.prefetchTabId = tabId;
+    tabPool.prefetchUrl = null;
+    tabPool.prefetchSlug = null;
+    return;
+  }
+  await closeTabsSafely([tabId]);
+}
+
 async function finishAgentTabs(fallbackTabId) {
   await endAgentRun(tabPool.workTabId || fallbackTabId);
   if (tabPool.prefetchTabId) await closeTabsSafely([tabPool.prefetchTabId]);
   resetTabPool();
 }
 
-async function processRun(source, profile, tabId, sessionId, { maxResults = MAX_EVENTS } = {}) {
+async function processRun(
+  source,
+  profile,
+  tabId,
+  sessionId,
+  { maxResults = MAX_EVENTS, workTabReady = null } = {}
+) {
   const queue = Array.isArray(source) ? queueFromArray(source) : source;
-  tabPool.workTabId = tabId;
+  if (tabId) tabPool.workTabId = tabId;
   const results = [];
   let currentProfile = profile;
   let navigated = false;
@@ -900,7 +927,11 @@ async function processRun(source, profile, tabId, sessionId, { maxResults = MAX_
         if (queue.done) break;
         if (!waitingLogged) {
           waitingLogged = true;
-          await logRunStep(RUN_STEPS.NAVIGATE, "Waiting for the next verified event…", "info");
+          await logRunStep(
+            RUN_STEPS.NAVIGATE,
+            results.length ? "Waiting for the next verified event…" : "Waiting for the first verified event…",
+            "info"
+          );
         }
         await interruptibleSleep(400);
         continue;
@@ -982,13 +1013,24 @@ async function processRun(source, profile, tabId, sessionId, { maxResults = MAX_
           });
           await waitForTabComplete(tabPool.workTabId);
         } else {
-          await setCursorOnTab(tabPool.workTabId, `Loading ${index}: ${event.title}`);
+          if (!tabPool.workTabId && workTabReady) {
+            // A source tab usually frees up within seconds; reuse it rather than opening another.
+            await Promise.race([workTabReady.catch(() => null), interruptibleSleep(15000)]);
+          }
           await logRunStep(RUN_STEPS.NAVIGATE, `Navigating to ${event.url}`, "info", {
             eventSlug: event.slug,
             eventTitle: event.title,
             eventUrl: event.url,
           });
-          await navigateTab(tabPool.workTabId, eventUrl, !navigated);
+          if (!tabPool.workTabId) {
+            const created = await chrome.tabs.create({ url: eventUrl, active: true });
+            tabPool.workTabId = created.id;
+            await setSessionRunControl({ workTabId: created.id });
+            await waitForTabComplete(created.id);
+          } else {
+            await setCursorOnTab(tabPool.workTabId, `Loading ${index}: ${event.title}`);
+            await navigateTab(tabPool.workTabId, eventUrl, !navigated);
+          }
         }
         navigated = true;
         await throwIfStoppedAsync();
@@ -1157,13 +1199,50 @@ async function ensureCvScript(tabId) {
   throw new Error("Could not load the Cerebral Valley scanner. Reload the extension and try again.");
 }
 
+function firstLumaLinkInHtml(html = "") {
+  // Matches plain hrefs and JSON-escaped ones (https:\/\/lu.ma\/slug) inside Next.js page data.
+  const re = /https?:(?:\\?\/){2}(?:www\.)?(?:lu\.ma|luma\.com)(?:\\?\/)([\w-]+)/g;
+  let match;
+  while ((match = re.exec(html))) {
+    if (isValidEventSlug(match[1])) return `https://luma.com/${match[1]}`;
+  }
+  return null;
+}
+
+function htmlTitle(html = "") {
+  const match = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+  return match ? match[1].replace(/\s+/g, " ").trim().slice(0, 140) : "";
+}
+
+/** Read a CV detail page with one background request instead of a full tab load. */
+async function resolveCvDetailByFetch(url) {
+  try {
+    const response = await fetch(url, { credentials: "omit" });
+    if (!response.ok) return { luma: null, platform: `http_${response.status}` };
+    const html = await response.text();
+    const luma = firstLumaLinkInHtml(html);
+    if (luma) return { luma, platform: "luma", title: htmlTitle(html) };
+    const platform = /meetup\.com/i.test(html)
+      ? "meetup"
+      : /eventbrite\.co/i.test(html)
+        ? "eventbrite"
+        : /partiful\.com/i.test(html)
+          ? "partiful"
+          : "unknown";
+    return { luma: null, platform, title: htmlTitle(html) };
+  } catch (err) {
+    return { luma: null, platform: "fetch_error", error: err?.message || String(err) };
+  }
+}
+
 /**
- * Discover Luma events from Cerebral Valley (Bay Area). Harvests direct Luma links from the events
- * list, then resolves CV /e/<slug> detail pages to their outbound Luma link (skipping Meetup /
- * Eventbrite events). Returns Luma event objects for the normal registration pipeline, which itself
- * skips anything already registered.
+ * Discover Luma events from Cerebral Valley (Bay Area). Direct Luma links are emitted as soon as
+ * the list is harvested; CV /e/<slug> detail pages are then resolved four at a time with
+ * background requests, and each resolved link is emitted immediately. A short tab-based fallback
+ * covers pages whose HTML does not carry the link. `emit(events)` streams results into the
+ * verifier; without it the events are returned at the end.
  */
-async function discoverCerebralValleyEvents(tabId, sessionId) {
+async function discoverCerebralValleyEvents(tabId, sessionId, emit = null) {
   const cvTab = await chrome.tabs.get(tabId).catch(() => null);
   if (cvTab && cvTab.status !== "complete") await waitForTabComplete(tabId);
   await interruptibleSleep(800);
@@ -1195,6 +1274,21 @@ async function discoverCerebralValleyEvents(tabId, sessionId) {
   const lumaUrls = new Set(harvest?.luma || []);
   const titles = new Map();
   const cvDetail = harvest?.cvDetail || [];
+  const collected = [];
+
+  const toEvents = (urls) =>
+    urls.map((url) => {
+      const slug = url.split("/").filter(Boolean).pop();
+      return { url, slug, title: titles.get(url) || slug, source: "cerebralvalley" };
+    });
+  const deliver = (urls) => {
+    if (!urls.length) return;
+    const events = toEvents(urls);
+    if (emit) emit(events);
+    else collected.push(...events);
+  };
+
+  deliver([...lumaUrls]);
 
   await logRunStep(
     RUN_STEPS.DISCOVER,
@@ -1203,26 +1297,52 @@ async function discoverCerebralValleyEvents(tabId, sessionId) {
     { counts, cvDetail: cvDetail.length }
   );
 
-  // Resolve CV detail pages to their Luma link. Each hop is a full page load, so this is the most
-  // expensive part of discovery — and with four sources feeding the queue, Cerebral Valley only
-  // needs to supply its fair share of the batch rather than fill it alone. Stopping at that share
-  // cuts the hops roughly threefold without changing what the interleaved ranking picks.
+  // Cerebral Valley only needs to supply its fair share of the batch, not fill it alone.
   const cvTarget = Math.max(8, Math.ceil(MAX_EVENTS / SOURCE_COUNT));
   const detailCap = Math.min(cvDetail.length, cvTarget * 2);
-  for (let i = 0; i < detailCap && lumaUrls.size < cvTarget; i++) {
+  const fallbacks = [];
+  const BATCH = 4;
+
+  for (let i = 0; i < detailCap && lumaUrls.size < cvTarget; i += BATCH) {
     await throwIfStoppedAsync();
     await waitIfPaused();
-    const d = cvDetail[i];
+    const batch = cvDetail.slice(i, i + BATCH);
+    const resolved = await Promise.all(
+      batch.map((d) => resolveCvDetailByFetch(d.url).then((r) => ({ d, r })))
+    );
+    const fresh = [];
+    for (const { d, r } of resolved) {
+      if (r.luma) {
+        if (lumaUrls.has(r.luma)) continue;
+        lumaUrls.add(r.luma);
+        titles.set(r.luma, r.title || d.title);
+        fresh.push(r.luma);
+        await logRunStep(RUN_STEPS.DISCOVER, `↳ Luma: ${d.title || d.slug}`, "info", { eventUrl: r.luma });
+      } else if (["meetup", "eventbrite", "partiful"].includes(r.platform)) {
+        await logRunStep(RUN_STEPS.DISCOVER, `↳ ${r.platform} — skipped: ${d.title || d.slug}`, "info");
+      } else {
+        fallbacks.push(d);
+      }
+    }
+    deliver(fresh);
+  }
+
+  // Pages whose HTML did not carry the link are client-rendered; open a few in the tab.
+  for (const d of fallbacks.slice(0, 4)) {
+    if (lumaUrls.size >= cvTarget) break;
+    await throwIfStoppedAsync();
+    await waitIfPaused();
     try {
       await navigateTab(tabId, d.url, false);
       await waitForPageSettled(tabId, { minMs: 300, maxMs: 1800 });
       await ensureCvScript(tabId);
       const res = await chrome.tabs.sendMessage(tabId, { type: "CV_EXTRACT_LUMA" }).catch(() => null);
-      if (res?.luma) {
+      if (res?.luma && !lumaUrls.has(res.luma)) {
         lumaUrls.add(res.luma);
         titles.set(res.luma, res.title || d.title);
+        deliver([res.luma]);
         await logRunStep(RUN_STEPS.DISCOVER, `↳ Luma: ${d.title || d.slug}`, "info", { eventUrl: res.luma });
-      } else {
+      } else if (!res?.luma) {
         await logRunStep(
           RUN_STEPS.DISCOVER,
           `↳ ${res?.platform || "no Luma link"} — skipped: ${d.title || d.slug}`,
@@ -1234,12 +1354,13 @@ async function discoverCerebralValleyEvents(tabId, sessionId) {
     }
   }
 
-  const events = [...lumaUrls].slice(0, MAX_EVENTS).map((url) => {
-    const slug = url.split("/").filter(Boolean).pop();
-    return { url, slug, title: titles.get(url) || slug, source: "cerebralvalley" };
-  });
-
-  return { events, counts, cvDetailCount: cvDetail.length };
+  return {
+    events: emit ? [] : collected.slice(0, MAX_EVENTS),
+    streamed: Boolean(emit),
+    counts,
+    cvDetailCount: cvDetail.length,
+    lumaCount: lumaUrls.size,
+  };
 }
 
 /**
@@ -1306,168 +1427,85 @@ async function startRun() {
   const sessionId = ++runSessionId;
   await resetRunControl();
   let workTabId = null;
-  let auxiliaryTabIds = [];
+  const sourceTabs = new Set();
 
   activeRun = { phase: "discovering", current: 0, total: MAX_EVENTS, results: [], logs: [] };
   await saveRunState(activeRun);
-  await logRunStep(
-      RUN_STEPS.DISCOVER,
-      `Scanning all ${SOURCE_COUNT} event sources together…`
-    );
+  await logRunStep(RUN_STEPS.DISCOVER, `Scanning all ${SOURCE_COUNT} event sources together…`);
   chrome.action.setBadgeText({ text: "…" });
   warmLocalModelForRun();
 
   try {
     // Stagger the two Luma page loads, then scan all three pages concurrently once loaded.
-    const workTab = await chrome.tabs.create({ url: EVENT_SOURCES.lumaSf.url, active: true });
+    const sfTab = await chrome.tabs.create({ url: EVENT_SOURCES.lumaSf.url, active: true });
     await interruptibleSleep(SOURCE_TAB_STAGGER_MS);
     const [bondTab, cvTab] = await Promise.all([
       chrome.tabs.create({ url: EVENT_SOURCES.bondAi.url, active: false }),
       chrome.tabs.create({ url: EVENT_SOURCES.cerebralValley.url, active: false }),
     ]);
-    workTabId = workTab.id;
-    auxiliaryTabIds = [bondTab.id, cvTab.id];
-    await beginAgentRun(workTab);
+    workTabId = sfTab.id;
+    for (const id of [sfTab.id, bondTab.id, cvTab.id]) sourceTabs.add(id);
+    await beginAgentRun(sfTab);
     await throwIfStoppedAsync();
     await waitIfPaused();
 
     const profile = await getProfile();
-    const scans = await Promise.allSettled([
-      scanLumaSource(workTab.id, EVENT_SOURCES.lumaSf, sessionId),
-      scanLumaSource(bondTab.id, EVENT_SOURCES.bondAi, sessionId),
-      discoverCerebralValleyEvents(cvTab.id, sessionId),
-      // Feed-based, so it runs alongside the tab scans without needing one of its own.
-      scanFoundersClub(sessionId),
-    ]);
-    assertRunSession(sessionId);
-    await throwIfStoppedAsync();
-    await waitIfPaused();
-
-    const scraped = [];
-    const prioritySlugs = [];
-    const combinedSkipUrls = {};
-    let sourceRateLimited = false;
+    const excludeIds = await getHistoryExcludeIds();
+    const queue = createRunQueue();
+    const pipeline = {
+      sourcesDone: 0,
+      sourcesTotal: SOURCE_COUNT,
+      links: 0,
+      verified: 0,
+      ready: 0,
+      found: 0,
+      done: false,
+    };
+    queue.progress = pipeline;
     const sourceCounts = {
       [EVENT_SOURCES.lumaSf.key]: 0,
       [EVENT_SOURCES.bondAi.key]: 0,
       [EVENT_SOURCES.cerebralValley.key]: 0,
       [EVENT_SOURCES.foundersClub.key]: 0,
     };
-    // Index-aligned with the Promise.allSettled fan-out above.
-    const orderedSources = [
-      EVENT_SOURCES.lumaSf,
-      EVENT_SOURCES.bondAi,
-      EVENT_SOURCES.cerebralValley,
-      EVENT_SOURCES.foundersClub,
-    ];
-
-    for (let i = 0; i < scans.length; i++) {
-      const scan = scans[i];
-      const sourceInfo = orderedSources[i];
-      if (scan.status === "rejected") {
-        await logRunStep(
-          RUN_STEPS.DISCOVER,
-          `${sourceInfo.label} scan failed: ${scan.reason?.message || "unknown error"}`,
-          "warn"
-        );
-        continue;
-      }
-
-      const value = scan.value || {};
-      if (value.rateLimited) {
-        sourceRateLimited = true;
-        await logRunStep(
-          RUN_STEPS.DISCOVER,
-          `${sourceInfo.label} returned a Luma rate-limit page — stopping safely`,
-          "warn"
-        );
-        continue;
-      }
-      const sourceEvents = (value.events || []).map((event) => ({
-        ...event,
-        source: sourceInfo.key,
-      }));
-      sourceCounts[sourceInfo.key] = sourceEvents.length;
-      scraped.push(...sourceEvents);
-      Object.assign(combinedSkipUrls, value.skipUrls || {});
-      for (const slug of value.prioritySlugs || sourceEvents.map((event) => event.slug)) {
-        if (slug && !prioritySlugs.includes(slug)) prioritySlugs.push(slug);
-      }
-
-      await logRunStep(
-        RUN_STEPS.DISCOVER,
-        `${sourceInfo.label}: ${sourceEvents.length} Luma event link${sourceEvents.length === 1 ? "" : "s"}`,
-        "info"
-      );
-    }
-
-    const { discoverSkipUrls = {} } = await chrome.storage.local.get("discoverSkipUrls");
-    await chrome.storage.local.set({
-      discoverSkipUrls: { ...discoverSkipUrls, ...combinedSkipUrls },
-      feedPrioritySlugs: prioritySlugs,
-    });
-
-    await closeTabsSafely(auxiliaryTabIds);
-    auxiliaryTabIds = [];
-
-    if (sourceRateLimited) {
-      const msg =
-        "Luma rate limit is already active on a source page. The run stopped without making verification requests or opening events.";
-      const stopped = {
-        phase: "stopped",
-        current: 0,
-        total: 0,
-        results: [],
-        error: msg,
-        logs: (await chrome.storage.local.get("runState")).runState?.logs || [],
-      };
-      await saveRunState(stopped);
-      await logRunStep(RUN_STEPS.DONE, msg, "warn");
-      chrome.action.setBadgeText({ text: "■" });
-      chrome.action.setBadgeBackgroundColor({ color: "#71717a" });
-      return { ok: true, ...stopped };
-    }
-
-    const excludeIds = await getHistoryExcludeIds();
-    const queue = createRunQueue();
+    const combinedSkipUrls = {};
+    const prioritySlugs = [];
     let lastProgressLogAt = 0;
 
-    const perSource = orderedSources
-      .map((source) => `${source.label} ${sourceCounts[source.key] || 0}`)
-      .join(" · ");
-    await logRunStep(RUN_STEPS.DISCOVER, `Sources synced (${SOURCE_COUNT}): ${perSource}`, "info", {
-      sourceCounts,
+    // ── Stage 2: verifier. Consumes links as sources push them; emits confirmed events. ──
+    const verifier = createStreamingVerifier({
+      maxResults: MAX_EVENTS,
+      excludeIds,
+      hooks: {
+        shouldStop: () => runControl.stopRequested || runSessionId !== sessionId || queue.closed,
+        onEvent: (event) => {
+          queuePush(queue, event);
+        },
+        onProgress: async ({ verified, total, ready, found }) => {
+          Object.assign(pipeline, { verified, links: total, ready, found });
+          const now = Date.now();
+          if (now - lastProgressLogAt < 2000) {
+            await patchRunState({ discovery: { ...pipeline }, upcoming: snapshotUpcoming(queue) });
+            return;
+          }
+          lastProgressLogAt = now;
+          await appendRunLog(
+            createLogEntry(
+              RUN_STEPS.DISCOVER,
+              `Verified ${verified}/${total} links · ${ready} ready to register`,
+              "info"
+            ),
+            { discovery: { ...pipeline }, upcoming: snapshotUpcoming(queue) }
+          );
+        },
+      },
     });
 
-    // Verification streams into the queue. Registration starts after the first few confirmed
-    // events instead of after the whole pass; the remaining lookups overlap the registration gaps.
-    const verification = discoverScrapedEventsWithStats(scraped, MAX_EVENTS, excludeIds, {
-      shouldStop: () => runControl.stopRequested || runSessionId !== sessionId || queue.closed,
-      onEvent: (event) => {
-        queuePush(queue, event);
-      },
-      onProgress: async ({ verified, total, ready, found }) => {
-        queue.progress = { verified, total, ready, found, done: false };
-        const now = Date.now();
-        if (verified !== total && now - lastProgressLogAt < 1500) {
-          await patchRunState({ discovery: queue.progress, upcoming: snapshotUpcoming(queue) });
-          return;
-        }
-        lastProgressLogAt = now;
-        await appendRunLog(
-          createLogEntry(
-            RUN_STEPS.DISCOVER,
-            `Verifying ${verified}/${total} links · ${ready} ready to register`,
-            "info"
-          ),
-          { discovery: queue.progress, upcoming: snapshotUpcoming(queue) }
-        );
-      },
-    })
+    const verification = verifier.done
       .then(async (disc) => {
         queue.stats = { ...disc.stats, sourceCounts, source: "all" };
-        queue.rateLimitStopped = Boolean(disc.stats.rateLimitStopped);
-        queue.progress = { ...(queue.progress || {}), done: true };
+        queue.rateLimitStopped = queue.rateLimitStopped || Boolean(disc.stats.rateLimitStopped);
+        pipeline.done = true;
         queue.done = true;
         await appendRunLog(
           createLogEntry(
@@ -1477,7 +1515,7 @@ async function startRun() {
             "info",
             { stats: queue.stats }
           ),
-          { stats: queue.stats, discovery: queue.progress }
+          { stats: queue.stats, discovery: { ...pipeline } }
         );
         if (disc.stats.rateLimitRetries > 0) {
           await logRunStep(
@@ -1491,40 +1529,107 @@ async function startRun() {
       .catch(async (err) => {
         queue.error = err;
         queue.done = true;
+        pipeline.done = true;
         await logRunStep(RUN_STEPS.DISCOVER, `Verification failed: ${err.message}`, "error");
         return null;
       });
 
-    await logRunStep(
-      RUN_STEPS.DISCOVER,
-      `Verifying ${scraped.length} links with Luma — registration starts once ${FIRST_BATCH_TO_START} are confirmed…`
+    // ── Stage 1: sources. Each pushes into the verifier the moment it has links. ──
+    let releaseWorkTab;
+    const workTabReady = new Promise((resolve) => {
+      releaseWorkTab = resolve;
+    });
+    const releaseSourceTab = async (tabId) => {
+      sourceTabs.delete(tabId);
+      await adoptTabIntoPool(tabId);
+      if (tabPool.workTabId) releaseWorkTab();
+    };
+    const feed = (sourceInfo, events, extra = {}) => {
+      const sourceEvents = events.map((event) => ({ ...event, source: sourceInfo.key }));
+      sourceCounts[sourceInfo.key] = (sourceCounts[sourceInfo.key] || 0) + sourceEvents.length;
+      Object.assign(combinedSkipUrls, extra.skipUrls || {});
+      for (const slug of extra.prioritySlugs || sourceEvents.map((event) => event.slug)) {
+        if (slug && !prioritySlugs.includes(slug)) prioritySlugs.push(slug);
+      }
+      verifier.push(sourceEvents);
+    };
+    const runSource = async (sourceInfo, work) => {
+      try {
+        const value = (await work()) || {};
+        if (value.rateLimited) {
+          queue.rateLimitStopped = true;
+          verifier.stop();
+          await logRunStep(
+            RUN_STEPS.DISCOVER,
+            `${sourceInfo.label} returned a Luma rate-limit page — stopping safely`,
+            "warn"
+          );
+          return;
+        }
+        feed(sourceInfo, value.events || [], value);
+        if (!value.streamed) {
+          const n = sourceCounts[sourceInfo.key] || 0;
+          await logRunStep(RUN_STEPS.DISCOVER, `${sourceInfo.label}: ${n} Luma event link${n === 1 ? "" : "s"}`, "info");
+        }
+      } catch (err) {
+        if (err instanceof StopRunError) throw err;
+        await logRunStep(
+          RUN_STEPS.DISCOVER,
+          `${sourceInfo.label} scan failed: ${err?.message || "unknown error"}`,
+          "warn"
+        );
+      } finally {
+        pipeline.sourcesDone += 1;
+        await patchRunState({ discovery: { ...pipeline } });
+      }
+    };
+
+    const scans = Promise.allSettled([
+      runSource(EVENT_SOURCES.lumaSf, () =>
+        scanLumaSource(sfTab.id, EVENT_SOURCES.lumaSf, sessionId).finally(() => releaseSourceTab(sfTab.id))
+      ),
+      runSource(EVENT_SOURCES.bondAi, () =>
+        scanLumaSource(bondTab.id, EVENT_SOURCES.bondAi, sessionId).finally(() => releaseSourceTab(bondTab.id))
+      ),
+      runSource(EVENT_SOURCES.cerebralValley, () =>
+        discoverCerebralValleyEvents(cvTab.id, sessionId, (events) =>
+          feed(EVENT_SOURCES.cerebralValley, events)
+        ).finally(() => releaseSourceTab(cvTab.id))
+      ),
+      runSource(EVENT_SOURCES.foundersClub, () => scanFoundersClub(sessionId)),
+    ]);
+
+    // ── Stage 3: registrar. Starts now and opens the first event the moment it is confirmed. ──
+    const registration = processRun(queue, profile, null, sessionId, { workTabReady }).catch(
+      (err) => ({ __error: err })
     );
 
-    while (!queue.done && queue.pending.length < FIRST_BATCH_TO_START) {
-      assertRunSession(sessionId);
-      await throwIfStoppedAsync();
-      await waitIfPaused();
-      await interruptibleSleep(300);
+    const scanResults = await scans;
+    const scanError = scanResults.find((r) => r.status === "rejected")?.reason || null;
+    verifier.finish();
+    releaseWorkTab();
+
+    if (!scanError) {
+      const { discoverSkipUrls = {} } = await chrome.storage.local.get("discoverSkipUrls");
+      await chrome.storage.local.set({
+        discoverSkipUrls: { ...discoverSkipUrls, ...combinedSkipUrls },
+        feedPrioritySlugs: prioritySlugs,
+      });
+      const perSource = orderedSourceList()
+        .map((source) => `${source.label} ${sourceCounts[source.key] || 0}`)
+        .join(" · ");
+      await logRunStep(RUN_STEPS.DISCOVER, `Sources synced (${SOURCE_COUNT}): ${perSource}`, "info", {
+        sourceCounts,
+      });
     }
-    assertRunSession(sessionId);
-    await throwIfStoppedAsync();
-    await waitIfPaused();
 
-    if (queue.done && queue.error) throw queue.error;
+    const final = await registration;
+    if (final?.__error) throw final.__error;
+    await verification;
+    if (scanError) throw scanError;
 
-    if (queue.done && !queue.pending.length) {
+    if (!final.results?.length && !final.error && final.phase === "done") {
       const stats = queue.stats || {};
-      const logs = (await chrome.storage.local.get("runState")).runState?.logs || [];
-      if (stats.rateLimitStopped) {
-        const msg =
-          "Luma rate limit is still active. The run stopped safely without opening more event pages. Please try again later.";
-        const stopped = { phase: "stopped", current: 0, total: 0, events: [], results: [], error: msg, stats, logs };
-        await saveRunState(stopped);
-        await logRunStep(RUN_STEPS.DONE, msg, "warn");
-        chrome.action.setBadgeText({ text: "■" });
-        chrome.action.setBadgeBackgroundColor({ color: "#71717a" });
-        return { ok: true, ...stopped };
-      }
       const msg =
         stats.lookupFailed > 0 && stats.hydrated === 0
           ? `Could not verify Luma events (${stats.lookupFailed} lookup failures) — please retry`
@@ -1533,39 +1638,12 @@ async function startRun() {
           : stats.totalSF > 0
             ? `No registerable events after verification (${stats.rejectedNonEvents || 0} non-event pages and ${stats.rejectedIneligible || 0} ineligible events removed)`
             : "No registerable SF events found";
-      const empty = { phase: "done", current: 0, total: 0, results: [], error: msg, stats, logs };
+      const empty = { ...final, error: msg, stats };
       await saveRunState(empty);
       chrome.action.setBadgeText({ text: "" });
       return { ok: true, ...empty };
     }
 
-    const upcomingList = snapshotUpcoming(queue);
-    await logRunStep(
-      RUN_STEPS.DISCOVER,
-      queue.done
-        ? `Discovery complete — ${queue.pending.length} events queued, opening the first…`
-        : `${queue.pending.length} events confirmed — opening the first while verification continues…`,
-      "info"
-    );
-    await interruptibleSleep(POST_DISCOVERY_COOLDOWN_MS);
-    await waitIfPaused();
-    await throwIfStoppedAsync();
-
-    const registering = {
-      phase: "registering",
-      current: 0,
-      total: queue.pending.length,
-      results: [],
-      upcoming: upcomingList,
-      stats: queue.stats || null,
-      discovery: queue.progress || null,
-      logs: (await chrome.storage.local.get("runState")).runState?.logs || [],
-    };
-    await saveRunState(registering);
-    activeRun = { ...registering };
-
-    const final = await processRun(queue, profile, workTab.id, sessionId);
-    await verification;
     return { ok: true, ...final };
   } catch (err) {
     if (err instanceof StopRunError) {
@@ -1593,8 +1671,17 @@ async function startRun() {
     await finishAgentTabs(workTabId);
     await resetRunControl();
     activeRun = null;
-    await closeTabsSafely(auxiliaryTabIds);
+    await closeTabsSafely([...sourceTabs]);
   }
+}
+
+function orderedSourceList() {
+  return [
+    EVENT_SOURCES.lumaSf,
+    EVENT_SOURCES.bondAi,
+    EVENT_SOURCES.cerebralValley,
+    EVENT_SOURCES.foundersClub,
+  ];
 }
 
 /**

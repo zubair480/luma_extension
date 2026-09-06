@@ -68,16 +68,38 @@ so no code path can click one — there is a regression test for exactly this.
 
 Invitations already handled in a previous run are skipped without reopening the tab.
 
-## Performance
+## How a run flows
 
-Three things dominate a run's wall clock, and each is bounded:
+A run is a three-stage pipeline, and every stage starts as soon as it has input:
+
+```text
+sources ──links──▶ verifier ──confirmed events──▶ registrar
+ (4, parallel)      (serial, 1.2s gap)             (one tab registers, one preloads)
+```
+
+1. **Sources.** The four scans run in parallel and each pushes its Luma links into the verifier
+   the moment it has them. The Founders Club feed lands in about a second, the two Luma feeds in
+   a few seconds, and Cerebral Valley's direct links arrive before its detail pages are resolved.
+2. **Verifier.** Takes links round-robin across sources, checks each against the Luma API on the
+   shared rate-limited lane, and hands every registerable event to the registrar the moment it is
+   confirmed. It stops early once there is enough verified inventory for the batch.
+3. **Registrar.** Starts immediately and opens the first event as soon as one is confirmed —
+   typically 10–20 seconds into the run, while the other sources are still scanning. Source tabs
+   are reused as the work tab and the preload tab when they free up.
+
+The panel shows the whole pipeline live: `sources 2/4 · 12/40 checked · 6 ready` while scanning,
+then `3/9+ · 6 ready · 31/58 checked` while registering (the `+` means verification is still
+adding events).
+
+## Performance
 
 | Cost | Handling |
 |------|----------|
-| Verifying scraped links against the Luma API (serialized, 1.2s minimum gap) | Verification streams: registration starts as soon as the first 3 events are confirmed and the remaining lookups run during the registration gaps. The panel shows `verified/total · ready` live. Verdicts are cached per slug for 6 hours, so repeat runs and cross-source overlap skip both the request and its gap. Transient failures are never cached. |
+| Verifying scraped links against the Luma API (serialized, 1.2s minimum gap) | Overlapped with the source scans and the registration gaps rather than run as a blocking pass. Verdicts are cached per slug for 6 hours, so repeat runs and cross-source overlap skip both the request and its gap. Transient failures are never cached. |
 | Loading the next event page | Two tabs alternate. While the run waits out the gap after one event, the next event's page loads in the other tab, so moving on is a tab switch instead of a load followed by a pause. Page loads keep their one-per-gap spacing. |
 | Waiting for the page and the registration modal | Polled until the content script answers (400ms floor, 3s ceiling), and the modal / sign-in prompt / result text is polled every 100–250ms instead of fixed 1.2s and 1.8s sleeps. |
-| Cerebral Valley detail-page hops, one full page load each | Bounded to that source's fair share of the batch rather than the whole batch. |
+| Cerebral Valley detail pages | Resolved four at a time with background requests to the page HTML; only pages whose HTML lacks the link fall back to a tab load, and those are capped. Bounded to that source's fair share of the batch. |
+| On-device model cold start (up to two minutes) | Warm-up begins the moment a run starts, so it overlaps discovery instead of the first custom question. |
 
 The gap between registrations (`REGISTRATION_DELAY_MS`, 12s) is deliberate and is **not** tuned
 down: Luma rate limits end a run, and the recovery costs far more than the delay saves.

@@ -300,7 +300,14 @@ assert(
     fs.readFileSync(path.join(__dirname, "../lib/substack-discovery.js"), "utf8")
   )
 );
-assert("Discovery ranks on interleaved source position", discoverySrc.includes("sourceOrder: index"));
+assert(
+  "Discovery ranks on interleaved source position",
+  discoverySrc.includes("sourceOrder: takeIndex++") && discoverySrc.includes("function takeNext()")
+);
+assert("Verification is streamable", discoverySrc.includes("export function createStreamingVerifier"));
+assert("Background streams sources into the verifier", bgSrc.includes("verifier.push(sourceEvents)"));
+assert("Registration starts before scans finish", bgSrc.includes("processRun(queue, profile, null, sessionId, { workTabReady })"));
+assert("CV detail pages resolve by fetch, not tab hops", bgSrc.includes("async function resolveCvDetailByFetch"));
 
 // Performance
 assert("Verified lookups are cached across runs", discoverySrc.includes("LOOKUP_CACHE_KEY"));
