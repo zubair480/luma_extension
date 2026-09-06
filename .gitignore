@@ -1,0 +1,36 @@
+# Node / extension build
+node_modules/
+extension/node_modules/
+extension/offscreen/offscreen.bundle.js
+extension/offscreen/ort-wasm-simd-threaded.jsep.mjs
+extension/offscreen/ort-wasm-simd-threaded.jsep.wasm
+extension/vendor/
+
+# Playwright leaves a full Chrome profile behind after a test run (~34 MB, ~950 files)
+extension/test/.pw-profile/
+test-results/
+playwright-report/
+
+# Browser profiles and local run state
+browser_profile/
+screenshots/
+
+# Python (legacy CLI)
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Local data and secrets
+.env
+data/
+*.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Personal profile for the legacy Python CLI (copy config/profile.example.yaml)
+config/profile.yaml

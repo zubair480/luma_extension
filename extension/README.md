@@ -1,0 +1,162 @@
+# Luma Agent — Chrome Extension
+
+One click scans **four curated Bay Area event sources**, dedupes and verifies what it finds against
+the Luma API, then auto-registers you for the free in-person ones using your saved profile.
+
+## Sources
+
+| Source | How it is read | Notes |
+|--------|----------------|-------|
+| [Luma San Francisco](https://luma.com/sf) | Tab + content script | Citywide feed |
+| [Bond AI](https://luma.com/genai-sf) | Tab + content script | SF & Bay Area AI calendar |
+| [Cerebral Valley](https://cerebralvalley.ai/events?locations=BAY_AREA) | Tab + content script | Keeps outbound Luma links only |
+| [Bay Area Founders Club](https://bayareafoundersclub.substack.com/) | RSS feed, no tab | Weekly "Bay Area Events For The Week Of …" post, ~60 Luma links |
+
+The Founders Club newsletter publishes Saturday evening PT. Its post body arrives complete inside
+the public RSS feed, so the extension reads it with a single background fetch — no tab, no scroll,
+no login. The parsed result is cached against the post's `pubDate`, so repeat runs in the same week
+skip the download.
+
+Links from every source are canonicalized (`lu.ma` → `luma.com`), deduped by slug, then verified
+one at a time against the Luma API. Verification is interleaved round-robin across sources and
+ranked on that interleaved position, so a source contributing 60 links cannot crowd out one
+contributing 5.
+
+## Install (automatic)
+
+**Double-click `install.bat`** in this folder, or run:
+
+```powershell
+cd extension
+.\install.ps1 -Launch
+```
+
+This creates a desktop shortcut **"Chrome with Luma Agent"** that opens Chrome with the extension already loaded — no need to visit `chrome://extensions` or click Load unpacked.
+
+> If Chrome is already open, close it first, then use the new shortcut (Chrome only loads extensions from `--load-extension` on startup).
+
+### Manual install (alternative)
+
+1. Open Chrome → `chrome://extensions`
+2. Enable **Developer mode**
+3. Click **Load unpacked** → select this `extension/` folder
+
+## Install (2 minutes)
+
+1. Open Chrome and go to `chrome://extensions`
+2. Enable **Developer mode** (top right)
+3. Click **Load unpacked**
+4. Select this folder: `extension/`
+5. Pin the **Luma Agent** icon to your toolbar
+
+## Accepting invitations
+
+Click **Accept my invitations**. The agent opens `luma.com/home`, collects every event you have a
+pending invitation to, and opens each one through the *same* pipeline that handles discovered
+events — so an invitation is only accepted if it passes every filter:
+
+- free (paid events and paid checkouts are skipped)
+- in person, in the Bay Area (online/virtual events are skipped)
+- not women-only
+- not sold out, ended, cancelled, or closed
+- not already registered, pending, or waitlisted
+- clear of the excluded keywords in your profile
+
+**The agent never declines anything.** An invitation that fails a check is left pending so you can
+decide yourself. Decline controls are filtered out of every clickable lookup in the content script,
+so no code path can click one — there is a regression test for exactly this.
+
+Invitations already handled in a previous run are skipped without reopening the tab.
+
+## Performance
+
+Three things dominate a run's wall clock, and each is bounded:
+
+| Cost | Handling |
+|------|----------|
+| Verifying scraped links against the Luma API (serialized, 1.2s minimum gap) | Verdicts are cached per slug for 6 hours, so repeat runs and cross-source overlap skip both the request and its gap. Transient failures are never cached. |
+| Waiting for an event page to become usable | Polled until the content script answers (400ms floor, 3s ceiling) rather than a flat 3s sleep. |
+| Cerebral Valley detail-page hops, one full page load each | Bounded to that source's fair share of the batch rather than the whole batch. |
+
+The gap between registrations (`REGISTRATION_DELAY_MS`, 12s) is deliberate and is **not** tuned
+down: Luma rate limits end a run, and the recovery costs far more than the delay saves.
+
+## Use
+
+1. **Sign in to [lu.ma](https://lu.ma)** in Chrome (if not already)
+2. Click the **Luma Agent** extension icon
+3. Click **Scan all 4 & get started**
+
+The extension will:
+- Scan all four sources concurrently and dedupe the results
+- Open each event in a new tab
+- Auto-fill your profile and submit registration
+- Show live progress in the popup
+
+## Your profile
+
+Pre-loaded with your details. Edit anytime via **Your profile** in the popup.
+
+## Notes
+
+- Only **free** events are registered (paid events are skipped)
+- Events requiring host approval are skipped
+- ~6 second delay between registrations to be polite
+- Keep the popup open to watch progress, or check the badge on the extension icon
+
+## Auto-reload during development
+
+Chrome does **not** auto-update unpacked extensions when you edit files. Two options:
+
+### Option A — Hot reload (recommended)
+
+```bash
+cd extension
+npm install
+npm run dev
+```
+
+Leave that terminal running. Load the extension **once** in `chrome://extensions`, then edit any file — Chrome reloads the extension automatically within ~1 second.
+
+How it works: a local file watcher sends a reload signal over WebSocket; `dev-reload.js` calls `chrome.runtime.reload()`.
+
+Before publishing to the Chrome Web Store, set `DEV_RELOAD = false` in `dev-reload.js`.
+
+### Option B — Keyboard shortcut
+
+Install the [Extensions Reloader](https://chromewebstore.google.com/detail/extensions-reloader/fimgfedafeadlieiabdeeaodndnlbhid) extension and assign a hotkey (e.g. Ctrl+Shift+R). Press it after each code change.
+
+---
+
+## Auto-update in production (without manual reload)
+
+| Method | How it works | Best for |
+|--------|--------------|----------|
+| **Chrome Web Store (unlisted)** | Upload a new `.zip` when you change version in `manifest.json`. Chrome auto-updates all installs within hours. | Easiest real auto-update |
+| **Self-hosted `update_url`** | Host a CRX + `updates.xml` on your server. Requires enterprise policy or special install flow — not practical for personal use. | Teams / enterprise |
+| **Dev hot reload (`npm run dev`)** | Instant reload while coding. Only for your machine. | Development |
+
+For personal use, the practical combo is:
+
+1. **While building** → `npm run dev` (instant reload)
+2. **When sharing** → publish unlisted on Chrome Web Store (users get automatic updates when you bump `"version"` in `manifest.json`)
+
+You only load unpacked **once**. After that, dev reload or Web Store updates handle the rest.
+
+
+| Issue | Fix |
+|-------|-----|
+| "Please sign in to Luma first" | Log in at lu.ma, then run again |
+| "No free events found" | Try again later — event availability changes |
+| Registration failed on one event | Check the open tab; some events have custom forms |
+
+## Files
+
+```
+extension/
+  manifest.json      Extension config
+  background.js      Event discovery + batch orchestration
+  content.js         Auto-fill & register on lu.ma pages
+  popup.html/js/css  One-click UI
+  lib/               Discovery API + constants
+```

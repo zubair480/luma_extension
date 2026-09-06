@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Visual Cursor Test Fixture</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 80px 40px; max-width: 640px; margin: 0 auto; }
+    .form-row { margin-bottom: 24px; }
+    label { display: block; font-weight: 600; margin-bottom: 6px; }
+    input, textarea, select, button {
+      width: 100%; padding: 10px 12px; font-size: 15px; border: 1px solid #cbd5e1; border-radius: 8px;
+    }
+    button { background: #6366f1; color: #fff; border: none; cursor: pointer; width: auto; padding: 12px 24px; }
+    #register-btn { margin-top: 32px; }
+  </style>
+</head>
+<body>
+  <h1>Mock Luma Registration</h1>
+  <form id="reg-form">
+    <div class="form-row">
+      <label for="name">What is your full name?</label>
+      <input id="name" type="text" placeholder="Full name" />
+    </div>
+    <div class="form-row">
+      <label for="email">Email address</label>
+      <input id="email" type="email" placeholder="you@example.com" />
+    </div>
+    <div class="form-row">
+      <label for="company">Company or school</label>
+      <input id="company" type="text" />
+    </div>
+    <div class="form-row">
+      <label for="role">What best describes your role?</label>
+      <select id="role">
+        <option value="">Select one</option>
+        <option value="engineer">Software Engineer</option>
+        <option value="founder">Founder</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label for="bio">Tell us about yourself</label>
+      <textarea id="bio" rows="3"></textarea>
+    </div>
+    <button type="button" id="register-btn">Register</button>
+  </form>
+  <script src="../../lib/visual-cursor.js"></script>
+  <script>
+    function setNativeValue(el, value) {
+      const proto = el.tagName === "TEXTAREA"
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      if (setter) setter.call(el, value);
+      else el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    async function setNativeValueVisual(el, value, hint) {
+      await visualFillField(el, hint ? `Filling: ${hint}` : "Filling field…");
+      setNativeValue(el, value);
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    window.__testHarness = {
+      setNativeValueVisual,
+      async runFullDemo() {
+        enableAgentCursor("Starting registration…");
+        await setNativeValueVisual(document.getElementById("name"), "Zubair Zafar", "What is your full name?");
+        await setNativeValueVisual(document.getElementById("email"), "zubairzafar480@gmail.com", "Email address");
+        await setNativeValueVisual(document.getElementById("company"), "Eastern Illinois University", "Company or school");
+        await visualClick(document.getElementById("role"), "Selecting role…");
+        document.getElementById("role").value = "engineer";
+        document.getElementById("role").dispatchEvent(new Event("change", { bubbles: true }));
+        await setNativeValueVisual(document.getElementById("bio"), "Software Engineer", "Tell us about yourself");
+        await visualClick(document.getElementById("register-btn"), "Submitting registration…");
+        return {
+          name: document.getElementById("name").value,
+          email: document.getElementById("email").value,
+          company: document.getElementById("company").value,
+          role: document.getElementById("role").value,
+          bio: document.getElementById("bio").value,
+        };
+      },
+      getUiState() {
+        const pointer = document.getElementById("luma-agent-cursor-pointer");
+        const highlight = document.getElementById("luma-agent-field-highlight");
+        const status = document.getElementById("luma-agent-status");
+        const ring = document.getElementById("luma-agent-cursor-ring");
+        const ptrRect = pointer?.getBoundingClientRect();
+        const nameEl = document.getElementById("name");
+        const nameRect = nameEl.getBoundingClientRect();
+        return {
+          cursorActive: window.__lumaAgentCursorActive,
+          pointerExists: !!pointer,
+          highlightExists: !!highlight,
+          statusExists: !!status,
+          ringExists: !!ring,
+          rootVisible: document.getElementById("luma-agent-cursor-root")?.style.display !== "none",
+          pointerLx: pointer?.style.getPropertyValue("--lx"),
+          pointerLy: pointer?.style.getPropertyValue("--ly"),
+          statusText: status?.textContent,
+          highlightVisible: highlight?.classList.contains("luma-visible"),
+          highlightBox: highlight ? {
+            left: parseFloat(highlight.style.left),
+            top: parseFloat(highlight.style.top),
+            width: parseFloat(highlight.style.width),
+            height: parseFloat(highlight.style.height),
+          } : null,
+          nameCenter: { x: nameRect.left + nameRect.width / 2, y: nameRect.top + nameRect.height / 2 },
+          pointerCenter: ptrRect ? { x: ptrRect.left + ptrRect.width / 2, y: ptrRect.top + ptrRect.height / 2 } : null,
+        };
+      },
+    };
+  </script>
+</body>
+</html>

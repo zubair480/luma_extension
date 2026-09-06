@@ -1,0 +1,56 @@
+city: sf
+city_place_id: discplace-BDj7GNbGlsF7Cka
+
+search_queries:
+  - AI
+  - tech
+  - startup
+  - machine learning
+  - developer
+  - agent
+
+min_relevance_score: 25
+free_only: true
+skip_sold_out: true
+skip_waitlist: false
+skip_approval_required: true
+max_pages_per_query: 3
+registration_delay_seconds: 45
+max_registrations_per_run: 10
+
+tech_keywords:
+  - ai
+  - artificial intelligence
+  - machine learning
+  - ml
+  - llm
+  - agent
+  - agentic
+  - tech
+  - technology
+  - startup
+  - developer
+  - engineering
+  - software
+  - data
+  - neural
+  - deep learning
+  - open source
+  - hackathon
+  - meetup
+  - dev
+  - cloud
+  - api
+  - robotics
+  - automation
+
+exclude_keywords:
+  - yoga
+  - fitness
+  - wine
+  - cooking
+  - dating
+  - singles
+  - real estate
+  - crypto scam
+  - nft drop

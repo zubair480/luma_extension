@@ -1,0 +1,35 @@
+{
+  "name": "luma-agent-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node dev-watcher.js",
+    "build:llm": "node scripts/copy-ort.mjs && esbuild offscreen/offscreen.js --bundle --format=esm --outfile=offscreen/offscreen.bundle.js --platform=browser --target=chrome109",
+    "postinstall": "npm run build:llm",
+    "test:discovery": "node test/discovery-edge-cases.mjs",
+    "test:visual": "node test/visual-cursor.test.mjs",
+    "test:audit": "node test/full-audit.test.mjs",
+    "test:options": "node test/option-select.test.mjs",
+    "test:sources": "node test/source-discovery.test.mjs",
+    "test:run-control": "node test/run-control.test.mjs",
+    "test:run-control-extension": "node test/run-control-extension.test.mjs",
+    "test:registration-action": "node test/registration-action-extension.test.mjs",
+    "test:popup-ui": "node test/popup-ui.test.mjs",
+    "test:live-sources": "node test/multi-source-extension.test.mjs",
+    "test:all": "node test/discovery-edge-cases.mjs && node test/source-discovery.test.mjs && node test/substack-discovery.test.mjs && node test/source-fairness.test.mjs && node test/lookup-cache.test.mjs && node test/exclude-index.test.mjs && node test/invitations.test.mjs && node test/visual-cursor.test.mjs && node test/full-audit.test.mjs && node test/option-select.test.mjs && node test/run-control.test.mjs && node test/run-control-extension.test.mjs && node test/registration-action-extension.test.mjs && node test/popup-ui.test.mjs",
+    "test:substack": "node test/substack-discovery.test.mjs",
+    "test:fairness": "node test/source-fairness.test.mjs",
+    "test:invitations": "node test/invitations.test.mjs",
+    "test:cache": "node test/lookup-cache.test.mjs",
+    "test:exclude": "node test/exclude-index.test.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.4.2"
+  },
+  "devDependencies": {
+    "chokidar": "^4.0.3",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.61.0",
+    "ws": "^8.18.0"
+  }
+}

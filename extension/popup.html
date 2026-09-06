@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Luma Agent</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <div class="ambient ambient-one" aria-hidden="true"></div>
+      <div class="ambient ambient-two" aria-hidden="true"></div>
+
+      <header class="app-header">
+        <div class="brand-lockup">
+          <div class="logo" aria-hidden="true"><span>⚡</span></div>
+          <div class="brand-copy">
+            <h1>Luma Agent</h1>
+            <p class="subtitle">Your event registration copilot</p>
+          </div>
+        </div>
+        <div class="mode-badge"><span></span> Auto RSVP</div>
+      </header>
+
+      <section class="launch-panel" aria-labelledby="launchHeading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Quick start</p>
+            <h2 id="launchHeading">Scan four curated sources</h2>
+          </div>
+          <span class="source-count">Up to 25</span>
+        </div>
+
+        <div class="launch-stack">
+          <div class="source-links" aria-label="Event sources">
+            <a class="source-link" href="https://luma.com/sf" target="_blank" rel="noopener">
+              <span class="source-mark mark-sf" aria-hidden="true">SF</span>
+              <span><strong>Luma San Francisco</strong><small>Citywide event feed</small></span>
+              <span class="source-link-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="source-link" href="https://luma.com/genai-sf" target="_blank" rel="noopener">
+              <span class="source-mark mark-bond" aria-hidden="true">AI</span>
+              <span><strong>Bond AI</strong><small>SF &amp; Bay Area AI calendar</small></span>
+              <span class="source-link-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="source-link" href="https://cerebralvalley.ai/events?locations=BAY_AREA" target="_blank" rel="noopener">
+              <span class="source-mark mark-cv" aria-hidden="true">CV</span>
+              <span><strong>Cerebral Valley</strong><small>Bay Area · Luma events only</small></span>
+              <span class="source-link-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="source-link" href="https://bayareafoundersclub.substack.com/" target="_blank" rel="noopener">
+              <span class="source-mark mark-bafc" aria-hidden="true">BA</span>
+              <span><strong>Bay Area Founders Club</strong><small>Weekly newsletter · read from RSS</small></span>
+              <span class="source-link-arrow" aria-hidden="true">↗</span>
+            </a>
+          </div>
+
+          <button id="runBtn" class="primary-btn source-luma start-all" type="button">
+            <span class="launch-icon" aria-hidden="true">4×</span>
+            <span class="btn-copy">
+              <span class="btn-label">Scan all 4 &amp; get started</span>
+              <span class="btn-sub">Deduplicate events, check RSVP status, then register</span>
+            </span>
+            <span class="btn-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <button id="inviteBtn" class="primary-btn secondary-btn accept-invites" type="button">
+            <span class="launch-icon" aria-hidden="true">✉</span>
+            <span class="btn-copy">
+              <span class="btn-label">Accept my invitations</span>
+              <span class="btn-sub">Same filters — never declines, never accepts paid or online</span>
+            </span>
+            <span class="btn-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+      </section>
+
+      <div id="runControls" class="run-controls hidden">
+        <button id="pauseBtn" class="control-btn control-pause" type="button">
+          <span class="control-icon">⏸</span>
+          <span id="pauseBtnLabel">Pause</span>
+        </button>
+        <button id="skipBtn" class="control-btn control-skip" type="button">
+          <span class="control-icon">⏭</span>
+          Skip
+        </button>
+        <button id="stopBtn" class="control-btn control-stop" type="button">
+          <span class="control-icon">■</span>
+          Stop
+        </button>
+      </div>
+
+      <div id="status" class="status hidden">
+        <div class="status-header">
+          <span id="statusPhase">Working…</span>
+          <span id="statusCount"></span>
+        </div>
+        <div class="progress-bar"><div id="progressFill"></div></div>
+
+        <div id="currentEventCard" class="current-event hidden">
+          <div class="current-event-label">Current event</div>
+          <a id="currentEventLink" href="#" target="_blank" rel="noopener"></a>
+          <button id="openEventTabBtn" class="secondary-btn open-event-btn" type="button">
+            Open in agent tab
+          </button>
+        </div>
+
+        <div id="upcomingCard" class="upcoming hidden">
+          <div class="upcoming-label">Upcoming events <span id="upcomingCount"></span></div>
+          <ul id="upcomingList" class="upcoming-list"></ul>
+        </div>
+
+        <details id="runLogDetails" class="run-log-details" open>
+          <summary>Activity log</summary>
+          <div class="run-log-actions">
+            <button id="copyLogsBtn" class="secondary-btn copy-logs-btn" type="button">Copy all logs</button>
+          </div>
+          <ul id="runLogList" class="run-log-list"></ul>
+        </details>
+
+        <ul id="resultsList"></ul>
+      </div>
+
+      <div id="hint" class="readiness-note">
+        <span class="readiness-dot" aria-hidden="true"></span>
+        <p>
+          <strong>Ready when you are</strong>
+          <span>Stay signed in while the agent works.</span>
+        </p>
+        <a href="https://lu.ma" target="_blank" rel="noopener">Open Luma</a>
+      </div>
+
+      <details class="profile-details ai-details" open>
+        <summary>
+          <span class="summary-title">
+            <span class="summary-icon" aria-hidden="true">AI</span>
+            <span>Local intelligence<small>Private answers on this device</small></span>
+          </span>
+          <span class="summary-badge">Built in</span>
+        </summary>
+        <div class="details-body">
+          <p class="llm-hint">
+            SmolLM2-360M answers custom registration questions locally. The first use downloads
+            about 200MB, then stays cached.
+          </p>
+          <p id="localAiStatus" class="local-ai-status">Checking model…</p>
+          <div class="llm-actions">
+            <button id="warmupLlm" class="secondary-btn" type="button">Prepare local AI</button>
+            <button id="testLlm" class="secondary-btn" type="button">Test an answer</button>
+          </div>
+          <p id="testLlmResult" class="test-llm-result hidden"></p>
+
+          <details class="cloud-llm-details">
+            <summary>Optional cloud fallback</summary>
+            <div class="cloud-details-body">
+              <div class="profile-grid llm-grid">
+                <label class="full-width">
+                  Provider
+                  <select id="llmProvider">
+                    <option value="local">Local only (SmolLM2-360M)</option>
+                    <option value="openai">OpenAI (gpt-4o-mini)</option>
+                    <option value="ollama">Ollama (local server)</option>
+                  </select>
+                </label>
+                <label class="full-width">
+                  OpenAI API key
+                  <input id="openaiKey" type="password" placeholder="sk-… (optional)" autocomplete="off" />
+                </label>
+                <label class="full-width">
+                  Ollama URL
+                  <input id="ollamaUrl" placeholder="http://127.0.0.1:11434" />
+                </label>
+                <label class="full-width">
+                  Ollama model
+                  <input id="ollamaModel" placeholder="llama3.2" />
+                </label>
+              </div>
+              <button id="saveLlm" class="secondary-btn" type="button">Save cloud settings</button>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <details class="profile-details">
+        <summary>
+          <span class="summary-title">
+            <span class="summary-icon profile-icon" aria-hidden="true">ME</span>
+            <span>Your profile<small>Used to complete registration forms</small></span>
+          </span>
+          <span class="summary-badge">Edit</span>
+        </summary>
+        <div class="details-body">
+          <div class="profile-grid">
+            <label>First name<input id="firstName" /></label>
+            <label>Last name<input id="lastName" /></label>
+            <label>Email<input id="email" type="email" /></label>
+            <label>Work email<input id="workEmail" type="email" /></label>
+            <label>Phone<input id="phone" /></label>
+            <label>Job title<input id="jobTitle" /></label>
+            <label>Company<input id="company" /></label>
+            <label>LinkedIn<input id="linkedin" /></label>
+            <label>GitHub<input id="github" /></label>
+          </div>
+          <button id="saveProfile" class="secondary-btn save-profile-btn">Save profile</button>
+          <div id="savedAnswersSection" class="saved-answers hidden">
+            <p class="saved-answers-title">Auto-saved form answers</p>
+            <ul id="savedAnswersList"></ul>
+          </div>
+        </div>
+      </details>
+    </div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
