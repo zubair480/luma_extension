@@ -133,7 +133,9 @@ function scanRegistrationFields(doc = document) {
   const root = getRegistrationModalRoot(doc) || getFormRoot(doc);
   if (!root) return [];
 
-  _fidCounter = 0;
+  // Never reset the counter: ids must stay unique across re-scans of the same form, because a
+  // field that appears on a later round would otherwise reuse an id already held by another
+  // element (and inherit its queued answer).
   const fields = [];
   const seen = new Set();
 

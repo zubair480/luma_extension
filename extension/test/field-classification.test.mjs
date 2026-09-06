@@ -168,6 +168,36 @@ streaming.finish();
 const streamed = await streaming.done;
 assert("feed-marked slug pushed before the skip is still dropped", lookups === 1 && streamed.stats.skippedKnown === 1);
 assert("the remaining link is verified", streamed.events.length === 1 && streamed.events[0].slug === "f-new");
+
+// Feed-page entries verify without a request
+lookups = 0;
+const pageEntry = {
+  api_id: "id-g-page",
+  event: { url: "g-page-event", api_id: "id-g-page", name: "Page Event", start_at: nowIso, geo_address_info: { city: "San Francisco", address: "2 Market St" } },
+  ticket_info: { is_free: true, is_sold_out: false, require_approval: false },
+  calendar: { name: "Host" },
+  registration_availability: "open",
+  waitlist_active: false,
+};
+const paidPageEntry = {
+  ...pageEntry,
+  api_id: "id-h-page",
+  event: { ...pageEntry.event, url: "h-page-paid", api_id: "id-h-page", name: "Paid Page Event" },
+  ticket_info: { is_free: false, is_sold_out: false, require_approval: false },
+};
+const pageVerifier = createStreamingVerifier({ maxResults: 10 });
+pageVerifier.push([
+  { url: "https://luma.com/g-page-event", source: "sf", entry: pageEntry },
+  { url: "https://luma.com/h-page-paid", source: "sf", entry: paidPageEntry },
+  { url: "https://luma.com/g-page-event", source: "sf" }, // scraped duplicate of the page entry
+  { url: "https://luma.com/i-scraped", source: "sf" },
+]);
+pageVerifier.finish();
+const pageResult = await pageVerifier.done;
+assert("page entries cost no lookup; only the scraped link does", lookups === 1 && pageResult.stats.verifiedFromPage === 2);
+assert("page entry is registerable straight from page data", pageResult.events.some((e) => e.slug === "g-page-event"));
+assert("paid page entry is rejected without a request", !pageResult.events.some((e) => e.slug === "h-page-paid"));
+assert("duplicate scraped link does not re-verify the page entry", pageResult.stats.totalScraped === 3);
 globalThis.fetch = realFetch;
 assert("onEvent order matches the returned list", JSON.stringify(seen) === JSON.stringify(result.events.map((e) => e.slug)));
 assert("onProgress fires once per lookup", progress.length === 3 && progress[2].verified === 3 && progress[2].total === 3);

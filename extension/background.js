@@ -768,12 +768,26 @@ async function scanLumaSource(tabId, source, sessionId) {
   assertRunSession(sessionId);
   await throwIfStoppedAsync();
 
+  // Entries embedded in the page carry the full API record, so they are pushed first: they win
+  // the per-slug dedup and verify with no request. The scraped links cover the rest of the feed.
+  const feedEntries = Array.isArray(feed?.feedEntries) ? feed.feedEntries : [];
+  const preVerified = feedEntries
+    .filter((entry) => entry?.event?.url)
+    .map((entry) => ({
+      url: `https://luma.com/${entry.event.url}`,
+      slug: entry.event.url,
+      title: entry.event.name || entry.event.url,
+      source: source.key,
+      entry,
+    }));
+
   return {
     source,
     rateLimited: Boolean(feed?.rateLimited),
     skipUrls: feed?.skipUrls || {},
     prioritySlugs: feed?.prioritySlugs || [],
-    events: (feed?.eventLinks || []).map((event) => ({ ...event, source: source.key })),
+    preVerified: preVerified.length,
+    events: [...preVerified, ...(feed?.eventLinks || []).map((event) => ({ ...event, source: source.key }))],
   };
 }
 
@@ -1401,8 +1415,10 @@ async function discoverCerebralValleyEvents(tabId, sessionId, emit = null) {
     deliver(fresh);
   }
 
-  // Pages whose HTML did not carry the link are client-rendered; open a few in the tab.
-  for (const d of fallbacks.slice(0, 4)) {
+  // Cerebral Valley renders its pages client-side, so the HTML fetch above is only an optimistic
+  // fast path: any page it could not resolve is opened in the tab exactly as before, bounded by
+  // this source's fair share of the batch.
+  for (const d of fallbacks) {
     if (lumaUrls.size >= cvTarget) break;
     await throwIfStoppedAsync();
     await waitIfPaused();
@@ -1555,8 +1571,8 @@ async function startRun() {
         onEvent: (event) => {
           queuePush(queue, event);
         },
-        onProgress: async ({ verified, total, ready, found, skippedKnown }) => {
-          Object.assign(pipeline, { verified, links: total, ready, found, skippedKnown });
+        onProgress: async ({ verified, total, ready, found, skippedKnown, fromPage }) => {
+          Object.assign(pipeline, { verified, links: total, ready, found, skippedKnown, fromPage });
           const now = Date.now();
           if (now - lastProgressLogAt < 2000) {
             await patchRunState({ discovery: { ...pipeline }, upcoming: snapshotUpcoming(queue) });
@@ -1585,7 +1601,9 @@ async function startRun() {
           createLogEntry(
             RUN_STEPS.DISCOVER,
             `Verification complete — ${disc.stats.totalScraped} unique links · ${disc.stats.hydrated} verified events · ${disc.stats.newRegisterable} registerable` +
-              (disc.stats.cacheHits ? ` · ${disc.stats.cacheHits} from cache` : ""),
+              (disc.stats.verifiedFromPage ? ` · ${disc.stats.verifiedFromPage} from page data` : "") +
+              (disc.stats.cacheHits ? ` · ${disc.stats.cacheHits} from cache` : "") +
+              (disc.stats.skippedKnown ? ` · ${disc.stats.skippedKnown} already handled` : ""),
             "info",
             { stats: queue.stats }
           ),
@@ -1649,7 +1667,8 @@ async function startRun() {
         feed(sourceInfo, value.events || [], value);
         if (!value.streamed) {
           const n = sourceCounts[sourceInfo.key] || 0;
-          await logRunStep(RUN_STEPS.DISCOVER, `${sourceInfo.label}: ${n} Luma event link${n === 1 ? "" : "s"}`, "info");
+          const pre = value.preVerified ? ` (${value.preVerified} verified from page data, no lookups)` : "";
+          await logRunStep(RUN_STEPS.DISCOVER, `${sourceInfo.label}: ${n} Luma event link${n === 1 ? "" : "s"}${pre}`, "info");
         }
       } catch (err) {
         if (err instanceof StopRunError) throw err;

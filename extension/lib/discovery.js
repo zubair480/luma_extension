@@ -348,6 +348,16 @@ async function fetchEventLookupBySlug(slug) {
   }
 }
 
+/** Build a lookup verdict from a feed page's embedded entry — same shape as the /url lookup. */
+function lookupFromFeedEntry(entry, slug = "") {
+  try {
+    const event = parseEvent(entry, "", `feed:${slug || entry?.event?.url || ""}`);
+    return event ? { status: "event", event, fromPage: true } : { status: "ineligible", kind: "event", fromPage: true };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchEventBySlug(slug) {
   const lookup = await fetchEventLookupBySlug(slug);
   return lookup.status === "event" ? lookup.event : null;
@@ -421,17 +431,22 @@ export function normalizeScrapedEventLinks(records = []) {
         if ((!existing.title || existing.title === slug) && record.title) {
           existing.title = record.title;
         }
+        if (!existing.entry && record.entry && typeof record.entry === "object") existing.entry = record.entry;
         continue;
       }
 
-      eventsBySlug.set(slug, {
+      const normalized = {
         slug,
         url: `https://luma.com/${slug}`,
         title: record.title || slug,
         source,
         sources: [source],
         sourceOrder: eventsBySlug.size,
-      });
+      };
+      // A feed page can hand over the full API entry for a card; keep it so verification can
+      // use it instead of a request.
+      if (record.entry && typeof record.entry === "object") normalized.entry = record.entry;
+      eventsBySlug.set(slug, normalized);
     } catch {
       /* Ignore malformed and non-Luma URLs from source pages. */
     }
@@ -510,6 +525,7 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
     rateLimitRetries: 0,
     rateLimitStopped: false,
     skippedKnown: 0,
+    fromPage: 0,
   };
   // Events already handled (history) or already marked Going / Pending on a feed card are
   // known before any request is made; they are dropped here instead of costing a lookup.
@@ -601,10 +617,13 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
         continue;
       }
 
-      const cached = readLookupCache(record.slug);
-      const lookup = cached || (await fetchEventLookupBySlug(record.slug));
-      if (cached) state.cacheHits++;
-      else writeLookupCache(record.slug, lookup);
+      // Page data is live and free; the cache is next; the API request is the last resort.
+      const fromEntry = record.entry ? lookupFromFeedEntry(record.entry, record.slug) : null;
+      const cached = fromEntry ? null : readLookupCache(record.slug);
+      const lookup = fromEntry || cached || (await fetchEventLookupBySlug(record.slug));
+      if (fromEntry) state.fromPage++;
+      else if (cached) state.cacheHits++;
+      if (!cached) writeLookupCache(record.slug, lookup);
 
       state.verified++;
       lookupCounts[lookup.status] = (lookupCounts[lookup.status] || 0) + 1;
@@ -643,6 +662,7 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
             slug: record.slug,
             finished: state.finished,
             skippedKnown: state.skippedKnown,
+            fromPage: state.fromPage,
           });
         } catch {
           /* progress reporting is best-effort */
@@ -677,6 +697,7 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
         rateLimitRetries: state.rateLimitRetries,
         rateLimitStopped: state.rateLimitStopped,
         skippedKnown: state.skippedKnown,
+        verifiedFromPage: state.fromPage,
         pageCheckRequired: 0,
         freeRegisterable: registerable.length,
         newRegisterable: eligible.length,

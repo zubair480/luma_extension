@@ -1725,6 +1725,66 @@ async function scanInvitationsWithScroll() {
   return { invites, skipUrls, rateLimited: false, loggedIn: !isLoginRequired() };
 }
 
+/**
+ * Luma feed pages ship the first page of cards as full API entries (event, ticket_info,
+ * registration_availability, guest_info …) in their embedded page data. Those entries carry
+ * everything verification would otherwise fetch one slug at a time, so they are returned
+ * alongside the scraped links and verified without a request.
+ */
+function readEmbeddedFeedEntries() {
+  try {
+    const script = document.getElementById("__NEXT_DATA__");
+    if (!script) return [];
+    const data = JSON.parse(script.textContent || "{}");
+    const entries = [];
+    const seen = new Set();
+    const now = Date.now();
+    const looksLikeEntryList = (node) =>
+      Array.isArray(node) &&
+      node.length > 0 &&
+      node[0] &&
+      typeof node[0] === "object" &&
+      node[0].event &&
+      node[0].ticket_info;
+
+    const walk = (node, depth) => {
+      if (!node || typeof node !== "object" || depth > 14) return;
+      if (looksLikeEntryList(node)) {
+        for (const entry of node) {
+          const event = entry?.event;
+          const slug = event?.url;
+          if (!slug || seen.has(slug)) continue;
+          const endsAt = Date.parse(event.end_at || event.start_at || "");
+          if (Number.isFinite(endsAt) && endsAt < now) continue; // past-events lists
+          seen.add(slug);
+          const { cover_url, social_image_url, ...slimEvent } = event;
+          entries.push({
+            api_id: entry.api_id,
+            event: slimEvent,
+            ticket_info: entry.ticket_info,
+            calendar: { name: entry.calendar?.name || "" },
+            registration_availability: entry.registration_availability,
+            waitlist_active: entry.waitlist_active,
+            role: entry.role,
+            guest_info: entry.guest_info || null,
+          });
+        }
+        return;
+      }
+      if (Array.isArray(node)) {
+        for (const child of node) walk(child, depth + 1);
+        return;
+      }
+      for (const value of Object.values(node)) walk(value, depth + 1);
+    };
+
+    walk(data, 0);
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
 /** Scroll SF feed to load lazy cards, then collect slugs in page order. */
 async function scanDiscoverPageFeedWithScroll() {
   if (isRateLimitPage()) {
@@ -1770,7 +1830,7 @@ async function scanDiscoverPageFeedWithScroll() {
   }
 
   window.scrollTo({ top: 0, behavior: "instant" });
-  return { skipUrls, prioritySlugs, eventLinks, rateLimited: false };
+  return { skipUrls, prioritySlugs, eventLinks, feedEntries: readEmbeddedFeedEntries(), rateLimited: false };
 }
 
 function scanDiscoverPageStatuses() {

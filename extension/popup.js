@@ -192,20 +192,13 @@ function renderUpcoming(state) {
   });
 }
 
-function renderRunLogs(state) {
-  const logs = state?.logs || [];
-  runLogList.innerHTML = "";
+const LOG_ROWS_VISIBLE = 80;
+let lastRenderedLogKey = null;
+const logEntryKey = (entry) => `${entry.ts}|${entry.step}|${entry.message}`;
 
-  if (!logs.length) {
+function buildLogRow(entry) {
     const li = document.createElement("li");
-    li.textContent = "Logs appear here as the agent works…";
-    li.style.color = "#71717a";
-    runLogList.appendChild(li);
-    return;
-  }
-
-  for (const entry of logs.slice(-80)) {
-    const li = document.createElement("li");
+    li.className = "log-entry";
     const time = document.createElement("span");
     time.className = "log-time";
     time.textContent = formatLogTime(entry.ts);
@@ -235,9 +228,44 @@ function renderRunLogs(state) {
     li.appendChild(time);
     li.appendChild(step);
     li.appendChild(msg);
+    return li;
+}
+
+/**
+ * The run state arrives several times a second while a form is being filled. Appending only the
+ * rows added since the last render keeps the panel steady instead of rebuilding 80 rows each time.
+ */
+function renderRunLogs(state) {
+  const logs = state?.logs || [];
+
+  if (!logs.length) {
+    runLogList.innerHTML = "";
+    const li = document.createElement("li");
+    li.textContent = "Logs appear here as the agent works…";
+    li.style.color = "#71717a";
     runLogList.appendChild(li);
+    lastRenderedLogKey = null;
+    return;
   }
 
+  let startIndex = -1;
+  if (lastRenderedLogKey && runLogList.querySelector("li.log-entry")) {
+    for (let i = logs.length - 1; i >= 0; i--) {
+      if (logEntryKey(logs[i]) === lastRenderedLogKey) {
+        startIndex = i + 1;
+        break;
+      }
+    }
+  }
+  if (startIndex < 0) {
+    runLogList.innerHTML = "";
+    startIndex = Math.max(0, logs.length - LOG_ROWS_VISIBLE);
+  }
+
+  for (const entry of logs.slice(startIndex)) runLogList.appendChild(buildLogRow(entry));
+  while (runLogList.children.length > LOG_ROWS_VISIBLE) runLogList.removeChild(runLogList.firstChild);
+
+  lastRenderedLogKey = logEntryKey(logs[logs.length - 1]);
   runLogList.scrollTop = runLogList.scrollHeight;
 }
 
