@@ -9,7 +9,7 @@ the Luma API, then auto-registers you for the free in-person ones using your sav
 |--------|----------------|-------|
 | [Luma San Francisco](https://luma.com/sf) | Tab + content script | Citywide feed |
 | [Bond AI](https://luma.com/genai-sf) | Tab + content script | SF & Bay Area AI calendar |
-| [Cerebral Valley](https://cerebralvalley.ai/events?locations=BAY_AREA) | Tab + content script | Keeps outbound Luma links only |
+| [Cerebral Valley](https://cerebralvalley.ai/events?locations=BAY_AREA) | Public JSON API, no tab | Keeps outbound Luma links only; falls back to a tab scan if the API is unavailable |
 | [Bay Area Founders Club](https://bayareafoundersclub.substack.com/) | RSS feed, no tab | Weekly "Bay Area Events For The Week Of …" post, ~60 Luma links |
 
 The Founders Club newsletter publishes Saturday evening PT. Its post body arrives complete inside
@@ -78,8 +78,9 @@ sources ──links──▶ verifier ──confirmed events──▶ registrar
 ```
 
 1. **Sources.** The four scans run in parallel and each pushes its Luma links into the verifier
-   the moment it has them. The Founders Club feed lands in about a second, the two Luma feeds in
-   a few seconds, and Cerebral Valley's direct links arrive before its detail pages are resolved.
+   the moment it has them. The Founders Club feed and the Cerebral Valley API land in about a
+   second each, and the two Luma feeds in a few seconds — with their first page of cards already
+   verified from page data.
 2. **Verifier.** Takes links round-robin across sources, checks each against the Luma API on the
    shared rate-limited lane, and hands every registerable event to the registrar the moment it is
    confirmed. It stops early once there is enough verified inventory for the batch.
@@ -98,7 +99,7 @@ adding events).
 | Verifying scraped links against the Luma API (serialized, 1.2s minimum gap) | Overlapped with the source scans and the registration gaps rather than run as a blocking pass. Verdicts are cached per slug for 6 hours, so repeat runs and cross-source overlap skip both the request and its gap. Transient failures are never cached. |
 | Loading the next event page | Two tabs alternate. While the run waits out the gap after one event, the next event's page loads in the other tab, so moving on is a tab switch instead of a load followed by a pause. Page loads keep their one-per-gap spacing. |
 | Waiting for the page and the registration modal | Polled until the content script answers (400ms floor, 3s ceiling), and the modal / sign-in prompt / result text is polled every 100–250ms instead of fixed 1.2s and 1.8s sleeps. |
-| Cerebral Valley detail pages | A background request to the page HTML is tried first, four at a time; Cerebral Valley renders client-side, so pages it cannot resolve are opened in the tab as before. Bounded to that source's fair share of the batch. |
+| Cerebral Valley | Read from `api.cerebralvalley.ai/v1/public/event/pull`, the same endpoint the events page renders from: two or three GET requests return every listed event with its outbound link, so no tab, scroll loop, or detail-page hop is needed. If the endpoint fails, the tab-based scanner runs exactly as before. |
 | Luma feed pages | The first page of cards on `luma.com/sf` and `luma.com/genai-sf` ships as full API entries in the page data. Those are verified straight from the page with no request, so the first events are ready the moment the feed scan finishes; only scrolled-in cards need a lookup. |
 | On-device model cold start (up to two minutes) | Warm-up begins the moment a run starts, so it overlaps discovery instead of the first custom question. |
 | Free-text questions answered by the model | Every model-answered question on a form is fired at once when the form is scanned, so answers are produced while the typed fields are filled. Local-model requests are queued on one lane (the WASM pipeline is single-threaded); cloud providers run in parallel. |

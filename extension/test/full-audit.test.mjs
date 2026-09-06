@@ -308,6 +308,8 @@ assert("Verification is streamable", discoverySrc.includes("export function crea
 assert("Background streams sources into the verifier", bgSrc.includes("verifier.push(sourceEvents)"));
 assert("Registration starts before scans finish", bgSrc.includes("processRun(queue, profile, null, sessionId, { workTabReady })"));
 assert("CV detail pages resolve by fetch, not tab hops", bgSrc.includes("async function resolveCvDetailByFetch"));
+assert("Cerebral Valley is read from its public API first", bgSrc.includes("discoverCerebralValleyViaApi({"));
+assert("Cerebral Valley tab is created only for the fallback", bgSrc.includes("const getCvTabId = async () =>"));
 
 // Performance
 assert("Verified lookups are cached across runs", discoverySrc.includes("LOOKUP_CACHE_KEY"));

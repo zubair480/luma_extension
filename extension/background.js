@@ -1,4 +1,5 @@
 import { createStreamingVerifier, compareEligibleEvents } from "./lib/discovery.js";
+import { discoverCerebralValleyViaApi } from "./lib/cv-api-discovery.js";
 import {
   discoverFoundersClubEvents,
   FOUNDERS_CLUB_HOME_URL,
@@ -1330,7 +1331,36 @@ async function resolveCvDetailByFetch(url) {
  * covers pages whose HTML does not carry the link. `emit(events)` streams results into the
  * verifier; without it the events are returned at the end.
  */
-async function discoverCerebralValleyEvents(tabId, sessionId, emit = null) {
+async function discoverCerebralValleyEvents(getTabId, sessionId, emit = null) {
+  // The events page renders client-side from a public JSON API, so ask that first: two or three
+  // GET requests replace a tab load, a scroll loop, and one page load per detail hop.
+  const cvTarget = Math.max(8, Math.ceil(MAX_EVENTS / SOURCE_COUNT));
+  const api = await waitForStopWhile(discoverCerebralValleyViaApi({ maxEvents: Math.max(30, cvTarget * 3) }));
+  assertRunSession(sessionId);
+  await throwIfStoppedAsync();
+
+  if (api.ok) {
+    const events = api.events.map((event) => ({ ...event, source: "cerebralvalley" }));
+    await logRunStep(
+      RUN_STEPS.DISCOVER,
+      `Cerebral Valley: ${events.length} Luma event${events.length === 1 ? "" : "s"} via API (${api.total ?? "?"} listed · ${api.counts.cv || 0} CV-hosted · ${api.counts.meetup || 0} Meetup · ${api.counts.eventbrite || 0} Eventbrite) — no tab needed`,
+      "info",
+      { counts: api.counts, pages: api.pages }
+    );
+    if (emit) {
+      emit(events);
+      return { events: [], streamed: true, counts: api.counts, viaApi: true, lumaCount: events.length };
+    }
+    return { events: events.slice(0, MAX_EVENTS), streamed: false, counts: api.counts, viaApi: true, lumaCount: events.length };
+  }
+
+  await logRunStep(
+    RUN_STEPS.DISCOVER,
+    `Cerebral Valley API unavailable (${api.error}) — scanning the events page instead`,
+    "warn"
+  );
+
+  const tabId = await getTabId();
   const cvTab = await chrome.tabs.get(tabId).catch(() => null);
   if (cvTab && cvTab.status !== "complete") await waitForTabComplete(tabId);
   await interruptibleSleep(800);
@@ -1386,7 +1416,6 @@ async function discoverCerebralValleyEvents(tabId, sessionId, emit = null) {
   );
 
   // Cerebral Valley only needs to supply its fair share of the batch, not fill it alone.
-  const cvTarget = Math.max(8, Math.ceil(MAX_EVENTS / SOURCE_COUNT));
   const detailCap = Math.min(cvDetail.length, cvTarget * 2);
   const fallbacks = [];
   const BATCH = 4;
@@ -1529,12 +1558,18 @@ async function startRun() {
     // Stagger the two Luma page loads, then scan all three pages concurrently once loaded.
     const sfTab = await chrome.tabs.create({ url: EVENT_SOURCES.lumaSf.url, active: true });
     await interruptibleSleep(SOURCE_TAB_STAGGER_MS);
-    const [bondTab, cvTab] = await Promise.all([
-      chrome.tabs.create({ url: EVENT_SOURCES.bondAi.url, active: false }),
-      chrome.tabs.create({ url: EVENT_SOURCES.cerebralValley.url, active: false }),
-    ]);
+    const bondTab = await chrome.tabs.create({ url: EVENT_SOURCES.bondAi.url, active: false });
     workTabId = sfTab.id;
-    for (const id of [sfTab.id, bondTab.id, cvTab.id]) sourceTabs.add(id);
+    for (const id of [sfTab.id, bondTab.id]) sourceTabs.add(id);
+    // Cerebral Valley is read over its API; a tab is opened only if that fails.
+    let cvTabId = null;
+    const getCvTabId = async () => {
+      if (cvTabId) return cvTabId;
+      const tab = await chrome.tabs.create({ url: EVENT_SOURCES.cerebralValley.url, active: false });
+      cvTabId = tab.id;
+      sourceTabs.add(tab.id);
+      return tab.id;
+    };
     await beginAgentRun(sfTab);
     await throwIfStoppedAsync();
     await waitIfPaused();
@@ -1691,9 +1726,9 @@ async function startRun() {
         scanLumaSource(bondTab.id, EVENT_SOURCES.bondAi, sessionId).finally(() => releaseSourceTab(bondTab.id))
       ),
       runSource(EVENT_SOURCES.cerebralValley, () =>
-        discoverCerebralValleyEvents(cvTab.id, sessionId, (events) =>
+        discoverCerebralValleyEvents(getCvTabId, sessionId, (events) =>
           feed(EVENT_SOURCES.cerebralValley, events)
-        ).finally(() => releaseSourceTab(cvTab.id))
+        ).finally(() => (cvTabId ? releaseSourceTab(cvTabId) : undefined))
       ),
       runSource(EVENT_SOURCES.foundersClub, () => scanFoundersClub(sessionId)),
     ]);
