@@ -3,7 +3,12 @@ import {
   discoverFoundersClubEvents,
   FOUNDERS_CLUB_HOME_URL,
 } from "./lib/substack-discovery.js";
-import { answerRegistrationQuestion, warmupLocalModel, getLocalModelStatus } from "./lib/llm-answer.js";
+import {
+  answerRegistrationQuestion,
+  warmupLocalModel,
+  getLocalModelStatus,
+  getLlmConfig,
+} from "./lib/llm-answer.js";
 import {
   buildHistoryExcludeIds,
   shouldExcludeFromDiscoveryHistory,
@@ -530,6 +535,42 @@ async function registerInTab(tabId, profile, event = {}) {
   }
 
   return { success: false, status: "rate_limited", message: "Luma rate limit remained active" };
+}
+
+/**
+ * Warm the on-device model while discovery runs. Its cold start (model load, up to two minutes
+ * on first use) then overlaps the source scans instead of stalling the first custom question.
+ * Fire-and-forget: the run never waits on it, and answers still work if it fails (cloud provider
+ * or rule-based fallback).
+ */
+let localWarmupInFlight = null;
+function warmLocalModelForRun() {
+  if (localWarmupInFlight) return localWarmupInFlight;
+  localWarmupInFlight = (async () => {
+    try {
+      const config = await getLlmConfig();
+      if (!config.enabled) return null;
+      const startedAt = Date.now();
+      const result = await warmupLocalModel();
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      // Only report into a run that is still going; a finished run should not grow new lines.
+      if (activeRun) {
+        await logRunStep(
+          RUN_STEPS.DISCOVER,
+          result.ok
+            ? `On-device AI ready (warmed up in ${seconds}s during discovery)`
+            : `On-device AI unavailable: ${result.error} — cloud or rule-based answers will be used`,
+          result.ok ? "info" : "warn"
+        );
+      }
+      return result;
+    } catch {
+      return null;
+    } finally {
+      localWarmupInFlight = null;
+    }
+  })();
+  return localWarmupInFlight;
 }
 
 async function openSidePanel(windowId) {
@@ -1274,6 +1315,7 @@ async function startRun() {
       `Scanning all ${SOURCE_COUNT} event sources together…`
     );
   chrome.action.setBadgeText({ text: "…" });
+  warmLocalModelForRun();
 
   try {
     // Stagger the two Luma page loads, then scan all three pages concurrently once loaded.
@@ -1577,6 +1619,7 @@ async function startInviteRun() {
   await saveRunState(activeRun);
   await logRunStep(RUN_STEPS.DISCOVER, "Checking Luma for pending invitations…");
   chrome.action.setBadgeText({ text: "…" });
+  warmLocalModelForRun();
 
   try {
     const workTab = await chrome.tabs.create({ url: INVITES_URL, active: true });

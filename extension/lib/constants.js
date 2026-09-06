@@ -328,7 +328,7 @@ export function isVirtualEvent(event) {
 }
 
 export const MIN_RELEVANCE_SCORE = 20;
-export const MAX_EVENTS = 25;
+export const MAX_EVENTS = 50;
 export const MAX_DISCOVERY_PAGES = 20;
 export const QUERY_MAX_PAGES = 5;
 // Leave breathing room between Luma page navigations. Form work usually adds more time, while this

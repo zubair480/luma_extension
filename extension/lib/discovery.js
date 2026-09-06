@@ -91,7 +91,7 @@ export async function flushLookupCache() {
 const API_BASE = "https://api2.luma.com/discover/get-paginated-events";
 const URL_LOOKUP_BASE = "https://api2.luma.com/url";
 const REQUEST_DELAY_MS = 1200;
-const MAX_FEED_HYDRATE = 80;
+const MAX_FEED_HYDRATE = 120;
 const LUMA_MIN_REQUEST_INTERVAL_MS = 1200;
 const LUMA_DEFAULT_RETRY_AFTER_MS = 15000;
 const LUMA_MAX_RETRY_AFTER_MS = 120000;
@@ -488,7 +488,7 @@ export function compareEligibleEvents(a, b) {
  */
 export async function discoverScrapedEventsWithStats(
   records = [],
-  maxResults = 25,
+  maxResults = 50,
   excludeIds = new Set(),
   hooks = {}
 ) {
@@ -721,13 +721,13 @@ export async function discoverAllSFEvents() {
 }
 
 /** Find up to maxResults registerable SF events — AI/tech first, then all other SF events */
-export async function discoverEvents(maxResults = 25, excludeIds = new Set()) {
+export async function discoverEvents(maxResults = 50, excludeIds = new Set()) {
   const { events } = await discoverEventsWithStats(maxResults, [], excludeIds);
   return events;
 }
 
 export async function discoverEventsWithStats(
-  maxResults = 25,
+  maxResults = 50,
   feedPrioritySlugs = [],
   excludeIds = new Set()
 ) {

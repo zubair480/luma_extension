@@ -170,7 +170,7 @@ function renderUpcoming(state) {
   upcomingCount.textContent = `(${upcoming.length})`;
   upcomingList.innerHTML = "";
 
-  upcoming.slice(0, 25).forEach((event, i) => {
+  upcoming.slice(0, 50).forEach((event, i) => {
     const li = document.createElement("li");
 
     const index = document.createElement("span");
