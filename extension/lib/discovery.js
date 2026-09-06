@@ -470,10 +470,27 @@ function interleaveRecordsBySource(records = []) {
  * verified by Luma as registerable events enter the queue. Calendar/community/system routes and
  * unavailable/closed/virtual/out-of-region events are rejected here instead of failing later.
  */
+/** Ranking used for the registration order: relevant first, then interleaved source position, then date. */
+export function compareEligibleEvents(a, b) {
+  return (
+    Number(b.relevanceScore >= MIN_RELEVANCE_SCORE) - Number(a.relevanceScore >= MIN_RELEVANCE_SCORE) ||
+    (a.sourceOrder ?? 0) - (b.sourceOrder ?? 0) ||
+    String(a.startAt || "9999").localeCompare(String(b.startAt || "9999"))
+  );
+}
+
+/**
+ * `hooks` lets the caller consume results while verification is still running:
+ *   onEvent(event)     — called for every verified event that is registerable and not in history
+ *   onProgress(info)   — awaited after every lookup ({ verified, total, found, ready, cacheHit })
+ *   shouldStop()       — return true to end the pass early (user pressed Stop)
+ * The return value is unchanged, so callers that only want the final list are unaffected.
+ */
 export async function discoverScrapedEventsWithStats(
   records = [],
   maxResults = 25,
-  excludeIds = new Set()
+  excludeIds = new Set(),
+  hooks = {}
 ) {
   await loadLookupCache();
   const allNormalized = normalizeScrapedEventLinks(records);
@@ -491,7 +508,11 @@ export async function discoverScrapedEventsWithStats(
   let rateLimitStopped = false;
   const verifiedTarget = Math.min(normalized.length, maxResults + Math.max(8, Math.ceil(maxResults / 3)));
 
-  for (const record of normalized) {
+  let ready = 0;
+  for (let index = 0; index < normalized.length; index++) {
+    const record = normalized[index];
+    if (typeof hooks.shouldStop === "function" && hooks.shouldStop()) break;
+
     const cached = readLookupCache(record.slug);
     const lookup = cached || (await fetchEventLookupBySlug(record.slug));
     if (cached) cacheHits++;
@@ -501,12 +522,40 @@ export async function discoverScrapedEventsWithStats(
     rateLimitRetries += lookup.rateLimitRetries || 0;
 
     if (lookup.status === "event") {
-      hydrated.push({
+      const event = {
         ...lookup.event,
         source: record.source,
         sources: record.sources,
         sourceOrder: record.sourceOrder,
-      });
+      };
+      hydrated.push(event);
+
+      if (typeof hooks.onEvent === "function") {
+        const [scored] = applyScores([event]);
+        if (scored && isRegisterable(scored) && !isExcludedFromHistory(scored, excludeIds)) {
+          ready++;
+          try {
+            hooks.onEvent(scored);
+          } catch {
+            /* consumer errors must not stop verification */
+          }
+        }
+      }
+    }
+
+    if (typeof hooks.onProgress === "function") {
+      try {
+        await hooks.onProgress({
+          verified: index + 1,
+          total: normalized.length,
+          found: hydrated.length,
+          ready,
+          cacheHit: Boolean(cached),
+          slug: record.slug,
+        });
+      } catch {
+        /* progress reporting is best-effort */
+      }
     }
 
     if (lookup.httpStatus === 429) {
@@ -523,13 +572,7 @@ export async function discoverScrapedEventsWithStats(
     .filter(isRegisterable)
     .filter((event) => !isExcludedFromHistory(event, excludeIds));
 
-  eligible.sort(
-    (a, b) =>
-      Number(b.relevanceScore >= MIN_RELEVANCE_SCORE) -
-        Number(a.relevanceScore >= MIN_RELEVANCE_SCORE) ||
-      a.sourceOrder - b.sourceOrder ||
-      String(a.startAt || "9999").localeCompare(String(b.startAt || "9999"))
-  );
+  eligible.sort(compareEligibleEvents);
 
   await flushLookupCache();
 

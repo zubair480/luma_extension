@@ -161,9 +161,20 @@ function scanRegistrationFields(doc = document) {
     }
     if (type === "radio") continue;
 
+    if (el.tagName === "SELECT") {
+      pushField({ el, kind: "select" });
+      continue;
+    }
+
+    // Search boxes and read-only triggers inside custom dropdowns are not text fields. They are
+    // handled by the dropdown pass below; typing a profile answer into them was the main source
+    // of wrong values in option fields.
+    if (isCustomSelectInput(el)) continue;
+
     pushField({
       el,
-      kind: el.tagName === "SELECT" ? "select" : el.tagName === "TEXTAREA" ? "textarea" : "text",
+      kind: el.tagName === "TEXTAREA" ? "textarea" : "text",
+      attrType: classifyByInputAttributes(el),
     });
   }
 

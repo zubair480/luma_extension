@@ -256,14 +256,19 @@ function renderState(state) {
   renderRunLogs(state);
 
   if (state.phase === "discovering") {
-    statusPhase.textContent = "Scanning all 3 sources…";
+    const disc = state.discovery;
+    statusPhase.textContent = disc ? "Verifying events…" : "Scanning all 4 sources…";
     statusEl.classList.remove("is-paused");
-    if (state.stats) {
+    if (disc?.total) {
+      statusCount.textContent = `${disc.verified}/${disc.total} checked · ${disc.ready} ready`;
+      progressFill.style.width = `${10 + Math.round((disc.verified / disc.total) * 30)}%`;
+    } else if (state.stats) {
       statusCount.textContent = `${state.stats.totalSF} found · ${state.stats.newRegisterable ?? state.stats.freeRegisterable} new`;
+      progressFill.style.width = "10%";
     } else {
       statusCount.textContent = "";
+      progressFill.style.width = "10%";
     }
-    progressFill.style.width = "10%";
   } else if (state.phase === "paused") {
     statusPhase.textContent = "Paused";
     statusEl.classList.add("is-paused");
@@ -279,8 +284,9 @@ function renderState(state) {
   if (state.phase === "registering") {
     statusPhase.textContent = "Registering…";
     statusEl.classList.remove("is-paused");
-    statusCount.textContent = `${state.current}/${state.total}`;
-    progressFill.style.width = `${(state.current / state.total) * 100}%`;
+    const verifying = state.discovery && !state.discovery.done;
+    statusCount.textContent = `${state.current}/${state.total}${verifying ? "+" : ""}`;
+    progressFill.style.width = `${Math.min(100, (state.current / Math.max(1, state.total)) * 100)}%`;
     renderCurrentEvent(state);
   }
 

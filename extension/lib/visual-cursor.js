@@ -29,7 +29,7 @@ function injectStyles() {
       height: 28px;
       margin: -4px 0 0 -4px;
       transform: translate(var(--lx, 0px), var(--ly, 0px));
-      transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+      transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
       filter: drop-shadow(0 2px 6px rgba(0,0,0,0.35));
       z-index: 2147483647;
     }
@@ -44,7 +44,7 @@ function injectStyles() {
       border-radius: 50%;
       transform: translate(var(--lx, 0px), var(--ly, 0px)) scale(0.6);
       opacity: 0.85;
-      transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s;
+      transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s;
       z-index: 2147483646;
     }
     #luma-agent-cursor-ring.luma-click {
@@ -184,10 +184,10 @@ function setAgentStatus(message) {
 async function moveCursorTo(el) {
   if (!el || !cursorActive) return;
   el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-  await new Promise((r) => setTimeout(r, 350));
+  await new Promise((r) => setTimeout(r, 200));
   const { x, y } = elementCenter(el);
   setCursorPosition(x, y);
-  await new Promise((r) => setTimeout(r, 480));
+  await new Promise((r) => setTimeout(r, 300));
 }
 
 async function visualClick(el, message, opts = {}) {
@@ -218,7 +218,7 @@ async function visualClick(el, message, opts = {}) {
       cursorRing.classList.remove("luma-click");
       void cursorRing.offsetWidth;
       cursorRing.classList.add("luma-click");
-      await new Promise((r) => setTimeout(r, 180));
+      await new Promise((r) => setTimeout(r, 140));
     }
   }
 
@@ -239,7 +239,7 @@ async function visualFillField(el, message) {
   if (cursorActive) {
     await moveCursorTo(el);
     highlightElement(el);
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 120));
   }
 }
 

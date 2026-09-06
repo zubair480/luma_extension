@@ -74,12 +74,29 @@ Three things dominate a run's wall clock, and each is bounded:
 
 | Cost | Handling |
 |------|----------|
-| Verifying scraped links against the Luma API (serialized, 1.2s minimum gap) | Verdicts are cached per slug for 6 hours, so repeat runs and cross-source overlap skip both the request and its gap. Transient failures are never cached. |
-| Waiting for an event page to become usable | Polled until the content script answers (400ms floor, 3s ceiling) rather than a flat 3s sleep. |
+| Verifying scraped links against the Luma API (serialized, 1.2s minimum gap) | Verification streams: registration starts as soon as the first 3 events are confirmed and the remaining lookups run during the registration gaps. The panel shows `verified/total · ready` live. Verdicts are cached per slug for 6 hours, so repeat runs and cross-source overlap skip both the request and its gap. Transient failures are never cached. |
+| Loading the next event page | Two tabs alternate. While the run waits out the gap after one event, the next event's page loads in the other tab, so moving on is a tab switch instead of a load followed by a pause. Page loads keep their one-per-gap spacing. |
+| Waiting for the page and the registration modal | Polled until the content script answers (400ms floor, 3s ceiling), and the modal / sign-in prompt / result text is polled every 100–250ms instead of fixed 1.2s and 1.8s sleeps. |
 | Cerebral Valley detail-page hops, one full page load each | Bounded to that source's fair share of the batch rather than the whole batch. |
 
 The gap between registrations (`REGISTRATION_DELAY_MS`, 12s) is deliberate and is **not** tuned
 down: Luma rate limits end a run, and the recovery costs far more than the delay saves.
+
+## Field filling
+
+Which profile value goes into which control is decided in this order:
+
+1. The control's own attributes (`type=tel`, `autocomplete=email`, `inputmode`, `name`). These win
+   over any nearby text, and a control typed this way never receives a saved free-text answer.
+2. The label, found as the nearest text that *precedes* the control without another control in
+   between, so a shared parent never lends the first question's label to every field.
+3. Saved answers, matched by whole-question overlap rather than substring, so a saved "Company"
+   does not fill "Company website".
+4. The LLM, only for free-text questions the profile cannot answer.
+
+Search boxes and read-only triggers inside custom dropdowns are never treated as text fields, and
+every value is shape-checked against the control before it is written (a phone number cannot land
+in an email or free-text field). `npm run test:fields` covers these cases.
 
 ## Use
 

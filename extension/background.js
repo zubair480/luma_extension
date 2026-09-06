@@ -1,4 +1,4 @@
-import { discoverScrapedEventsWithStats } from "./lib/discovery.js";
+import { discoverScrapedEventsWithStats, compareEligibleEvents } from "./lib/discovery.js";
 import {
   discoverFoundersClubEvents,
   FOUNDERS_CLUB_HOME_URL,
@@ -37,7 +37,9 @@ initExtensionStorage().then(() => mirrorRunControlToLocal()).catch(() => {});
 let activeRun = null;
 let runSessionId = 0;
 const SOURCE_TAB_STAGGER_MS = 1800;
-const POST_DISCOVERY_COOLDOWN_MS = 6000;
+const POST_DISCOVERY_COOLDOWN_MS = 2000;
+// Registration starts once this many events are verified; the rest verify during the run.
+const FIRST_BATCH_TO_START = 3;
 const PAGE_RATE_LIMIT_COOLDOWN_MS = 60000;
 
 const EVENT_SOURCES = {
@@ -320,22 +322,54 @@ async function mergeProfileAnswers(newAnswers) {
   }
 }
 
-async function saveRunState(state) {
+/**
+ * Every run-state write goes through one chain. Verification progress, content-script log lines
+ * and the registration loop all read-modify-write the same object; without serialization a
+ * progress patch could overwrite a result that landed a few milliseconds earlier.
+ */
+let runStateChain = Promise.resolve();
+function withRunStateLock(fn) {
+  const run = runStateChain.then(fn, fn);
+  runStateChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+async function writeRunState(state) {
   await chrome.storage.local.set({ runState: { ...state, updatedAt: Date.now() } });
 }
 
+async function saveRunState(state) {
+  return withRunStateLock(() => writeRunState(state));
+}
+
 async function appendRunLog(entry, patch = {}) {
-  const { runState = {} } = await chrome.storage.local.get("runState");
-  const logs = trimRunLogs([...(runState.logs || []), entry]);
-  const next = { ...runState, ...patch, logs };
-  if (activeRun) activeRun = { ...activeRun, ...patch, logs };
-  console.log("[Luma Agent]", entry.step, entry.message, entry.url || entry.href || "");
-  await saveRunState(next);
-  return next;
+  return withRunStateLock(async () => {
+    const { runState = {} } = await chrome.storage.local.get("runState");
+    const logs = trimRunLogs([...(runState.logs || []), entry]);
+    const next = { ...runState, ...patch, logs };
+    if (activeRun) activeRun = { ...activeRun, ...patch, logs };
+    console.log("[Luma Agent]", entry.step, entry.message, entry.url || entry.href || "");
+    await writeRunState(next);
+    return next;
+  });
 }
 
 async function logRunStep(step, message, level = "info", meta = {}) {
   return appendRunLog(createLogEntry(step, message, level, meta));
+}
+
+/** Merge fields into the persisted run state without adding a log entry. */
+async function patchRunState(patch = {}) {
+  return withRunStateLock(async () => {
+    const { runState = {} } = await chrome.storage.local.get("runState");
+    const next = { ...runState, ...patch };
+    if (activeRun) activeRun = { ...activeRun, ...patch };
+    await writeRunState(next);
+    return next;
+  });
 }
 
 async function waitForTabComplete(tabId, timeout = TAB_TIMEOUT_MS) {
@@ -643,7 +677,7 @@ async function navigateTab(tabId, url, active = false) {
 async function scanLumaSource(tabId, source, sessionId) {
   const tab = await chrome.tabs.get(tabId);
   if (tab.status !== "complete") await waitForTabComplete(tabId);
-  await interruptibleSleep(2500);
+  await waitForPageSettled(tabId, { minMs: 800, maxMs: 2500 });
   await waitIfPaused();
   assertRunSession(sessionId);
   await throwIfStoppedAsync();
@@ -665,197 +699,363 @@ async function scanLumaSource(tabId, source, sessionId) {
   };
 }
 
-async function processRun(events, profile, tabId, sessionId) {
+/**
+ * Registration queue. Verification pushes events in as Luma confirms them, so registering starts
+ * after the first few instead of after the whole pass; the remaining lookups overlap the run.
+ */
+function createRunQueue() {
+  return {
+    pending: [],
+    seen: new Set(),
+    done: false,
+    closed: false,
+    rateLimitStopped: false,
+    stats: null,
+    progress: null,
+    error: null,
+    keepOrder: false,
+  };
+}
+
+function queueFromArray(events = []) {
+  const queue = createRunQueue();
+  queue.keepOrder = true;
+  for (const event of events) queuePush(queue, event);
+  queue.done = true;
+  return queue;
+}
+
+function queuePush(queue, event) {
+  if (!event?.slug || queue.seen.has(event.slug)) return false;
+  queue.seen.add(event.slug);
+  queue.pending.push(event);
+  if (!queue.keepOrder) queue.pending.sort(compareEligibleEvents);
+  return true;
+}
+
+/** Take the next event. A page that is already preloaded wins; otherwise the best-ranked one. */
+function queueTake(queue, preferSlug = null) {
+  if (!queue.pending.length) return null;
+  let index = preferSlug ? queue.pending.findIndex((e) => e.slug === preferSlug) : -1;
+  if (index < 0) index = 0;
+  return queue.pending.splice(index, 1)[0];
+}
+
+function snapshotUpcoming(queue) {
+  return queue.pending.map((e) => ({ title: e.title, slug: e.slug, url: e.url }));
+}
+
+/**
+ * Two tabs alternate. While one event registers and the run waits out the registration gap, the
+ * next event's page loads in the other tab, so switching events is a tab switch rather than a
+ * page load followed by a pause.
+ */
+const tabPool = { workTabId: null, prefetchTabId: null, prefetchUrl: null, prefetchSlug: null };
+
+function resetTabPool() {
+  tabPool.workTabId = null;
+  tabPool.prefetchTabId = null;
+  tabPool.prefetchUrl = null;
+  tabPool.prefetchSlug = null;
+}
+
+function eventPageUrl(event) {
+  return String(event?.url || "").replace("lu.ma", "luma.com");
+}
+
+async function prefetchEventPage(event) {
+  const url = eventPageUrl(event);
+  if (!url || tabPool.prefetchUrl === url) return;
+  try {
+    if (tabPool.prefetchTabId) {
+      await chrome.tabs.update(tabPool.prefetchTabId, { url, active: false });
+    } else {
+      const tab = await chrome.tabs.create({ url, active: false });
+      tabPool.prefetchTabId = tab.id;
+    }
+    tabPool.prefetchUrl = url;
+    tabPool.prefetchSlug = event.slug;
+  } catch {
+    tabPool.prefetchTabId = null;
+    tabPool.prefetchUrl = null;
+    tabPool.prefetchSlug = null;
+  }
+}
+
+/** Bring a preloaded tab forward as the work tab; the old work tab becomes the next preload slot. */
+async function swapInPrefetchedTab(url) {
+  if (!tabPool.prefetchTabId || tabPool.prefetchUrl !== url) return false;
+  try {
+    const tab = await chrome.tabs.get(tabPool.prefetchTabId);
+    const current = String(tab.pendingUrl || tab.url || "").split(/[?#]/)[0];
+    // A redirect (sign-in, rate-limit page) means the preload is not the event page.
+    if (current && current !== url) return false;
+    await chrome.tabs.update(tabPool.prefetchTabId, { active: true });
+    const previousWork = tabPool.workTabId;
+    tabPool.workTabId = tabPool.prefetchTabId;
+    tabPool.prefetchTabId = previousWork;
+    tabPool.prefetchUrl = null;
+    tabPool.prefetchSlug = null;
+    await setSessionRunControl({ workTabId: tabPool.workTabId });
+    return true;
+  } catch {
+    tabPool.prefetchTabId = null;
+    tabPool.prefetchUrl = null;
+    tabPool.prefetchSlug = null;
+    return false;
+  }
+}
+
+/** The best pending event that will not be skipped without opening it. */
+async function nextPrefetchCandidate(queue) {
+  for (const event of queue.pending) {
+    if (await shouldSkipFromHistory(event)) continue;
+    if (await shouldSkipFromFeed(event)) continue;
+    return event;
+  }
+  return null;
+}
+
+async function finishAgentTabs(fallbackTabId) {
+  await endAgentRun(tabPool.workTabId || fallbackTabId);
+  if (tabPool.prefetchTabId) await closeTabsSafely([tabPool.prefetchTabId]);
+  resetTabPool();
+}
+
+async function processRun(source, profile, tabId, sessionId, { maxResults = MAX_EVENTS } = {}) {
+  const queue = Array.isArray(source) ? queueFromArray(source) : source;
+  tabPool.workTabId = tabId;
   const results = [];
   let currentProfile = profile;
   let navigated = false;
+  let index = 0;
+  let waitingLogged = false;
+  let haltedByRateLimit = false;
 
-  for (let i = 0; i < events.length; i++) {
-    assertRunSession(sessionId);
-    await throwIfStoppedAsync();
-    await waitIfPaused();
-
-    // Clear any skip request left over from a previous event so a later Stop is never
-    // mistaken for a skip.
-    if (runControl.skipRequested) {
-      runControl.skipRequested = false;
-      await setSessionRunControl({ runSkipRequested: false });
-    }
-
-    const event = events[i];
-    await chrome.storage.session.set({ currentRunEvent: event });
-
-    const afterNavLog = await appendRunLog(
-      createLogEntry(RUN_STEPS.NAVIGATE, `Event ${i + 1}/${events.length}: ${event.title}`, "info", {
+  const recordSkip = async (event, skip, level = "info") => {
+    results.push(skip);
+    await appendRunLog(
+      createLogEntry(RUN_STEPS.SKIP, skip.message || "Skipped", level, {
         eventSlug: event.slug,
         eventTitle: event.title,
-        eventUrl: event.url,
       }),
-      {
-        phase: "registering",
-        current: i + 1,
-        total: events.length,
-        currentEvent: event,
-        results: [...results],
-        upcoming: events.slice(i + 1).map((e) => ({ title: e.title, slug: e.slug, url: e.url })),
-      }
+      { currentEvent: null, skipRequested: false, results: [...results], upcoming: snapshotUpcoming(queue) }
     );
+    await chrome.storage.session.set({ currentRunEvent: null });
+  };
 
-    activeRun = afterNavLog;
-    chrome.action.setBadgeText({ text: String(i + 1) });
-    chrome.action.setBadgeBackgroundColor({ color: "#6366f1" });
-
-    const historySkip = await shouldSkipFromHistory(event);
-    if (historySkip) {
-      results.push(historySkip);
-      await appendRunLog(
-        createLogEntry(RUN_STEPS.SKIP, historySkip.message || "Previously handled", "info", {
-          eventSlug: event.slug,
-          eventTitle: event.title,
-        }),
-        { currentEvent: null, skipRequested: false, results: [...results] }
-      );
-      await appendHistory(historySkip);
-      await chrome.storage.session.set({ currentRunEvent: null });
-      if (i < events.length - 1) await interruptibleSleep(500);
-      continue;
-    }
-
-    const feedSkip = await shouldSkipFromFeed(event);
-    if (feedSkip) {
-      results.push(feedSkip);
-      await appendRunLog(
-        createLogEntry(RUN_STEPS.SKIP, feedSkip.message || "Skipped from feed", "info", {
-          eventSlug: event.slug,
-          eventTitle: event.title,
-        }),
-        { currentEvent: null, skipRequested: false, results: [...results] }
-      );
-      await appendHistory(feedSkip);
-      await chrome.storage.session.set({ currentRunEvent: null });
-      if (i < events.length - 1) await interruptibleSleep(500);
-      continue;
-    }
-
-    try {
+  try {
+    while (true) {
+      assertRunSession(sessionId);
       await throwIfStoppedAsync();
-      const eventUrl = event.url.replace("lu.ma", "luma.com");
-      if (!isValidEventHref(eventUrl)) {
-        const invalid = {
-          event,
-          success: false,
-          status: "skipped_invalid",
-          message: "Not an event page — skipped",
-          timestamp: new Date().toISOString(),
-        };
-        results.push(invalid);
-        await appendRunLog(
-          createLogEntry(RUN_STEPS.SKIP, invalid.message, "warn", {
-            eventSlug: event.slug,
-            eventTitle: event.title,
-          }),
-          { currentEvent: null, skipRequested: false, results: [...results] }
-        );
-        await chrome.storage.session.set({ currentRunEvent: null });
+      await waitIfPaused();
+
+      if (results.length >= maxResults) break;
+      if (queue.rateLimitStopped) {
+        haltedByRateLimit = true;
+        break;
+      }
+      if (!queue.pending.length) {
+        if (queue.done) break;
+        if (!waitingLogged) {
+          waitingLogged = true;
+          await logRunStep(RUN_STEPS.NAVIGATE, "Waiting for the next verified event…", "info");
+        }
+        await interruptibleSleep(400);
+        continue;
+      }
+      waitingLogged = false;
+
+      // Clear any skip request left over from a previous event so a later Stop is never
+      // mistaken for a skip.
+      if (runControl.skipRequested) {
+        runControl.skipRequested = false;
+        await setSessionRunControl({ runSkipRequested: false });
+      }
+
+      const event = queueTake(queue, tabPool.prefetchSlug);
+      index += 1;
+      const knownTotal = results.length + 1 + queue.pending.length;
+      await chrome.storage.session.set({ currentRunEvent: event });
+
+      const afterNavLog = await appendRunLog(
+        createLogEntry(
+          RUN_STEPS.NAVIGATE,
+          `Event ${index}${queue.done ? `/${knownTotal}` : ` of ${knownTotal}+`}: ${event.title}`,
+          "info",
+          { eventSlug: event.slug, eventTitle: event.title, eventUrl: event.url }
+        ),
+        {
+          phase: "registering",
+          current: index,
+          total: knownTotal,
+          currentEvent: event,
+          results: [...results],
+          upcoming: snapshotUpcoming(queue),
+          discovery: queue.progress || null,
+        }
+      );
+
+      activeRun = afterNavLog;
+      chrome.action.setBadgeText({ text: String(index) });
+      chrome.action.setBadgeBackgroundColor({ color: "#6366f1" });
+
+      const historySkip = await shouldSkipFromHistory(event);
+      if (historySkip) {
+        await recordSkip(event, historySkip);
+        await appendHistory(historySkip);
         continue;
       }
 
-      await setCursorOnTab(tabId, `Loading ${i + 1}/${events.length}: ${event.title}`);
-      await logRunStep(RUN_STEPS.NAVIGATE, `Navigating to ${event.url}`, "info", {
-        eventSlug: event.slug,
-        eventTitle: event.title,
-        eventUrl: event.url,
-      });
-      await navigateTab(tabId, eventUrl, !navigated);
-      navigated = true;
-      await throwIfStoppedAsync();
-      await ensureContentScript(tabId);
-      await setCursorOnTab(tabId, `Event ${i + 1}/${events.length}: ${event.title}`);
-      const result = await registerInTab(tabId, currentProfile, event);
-
-      const entry = {
-        event,
-        ...result,
-        timestamp: new Date().toISOString(),
-      };
-      results.push(entry);
-
-      const logLevel = entry.success ? (entry.skipped ? "info" : "success") : "error";
-      await appendRunLog(
-        createLogEntry(
-          entry.skipped ? RUN_STEPS.SKIP : entry.success ? RUN_STEPS.DONE : RUN_STEPS.ERROR,
-          entry.message || entry.status || "Finished",
-          logLevel,
-          { eventSlug: event.slug, eventTitle: event.title, status: entry.status }
-        ),
-        { currentEvent: null, skipRequested: false, results: [...results] }
-      );
-
-      await appendHistory(entry);
-      currentProfile = await getProfile();
-
-      if (entry.status === "rate_limited") {
-        await chrome.storage.session.set({ currentRunEvent: null });
-        const { runState: latestRateState = {} } = await chrome.storage.local.get("runState");
-        const stopped = {
-          phase: "stopped",
-          current: results.length,
-          total: events.length,
-          results,
-          error:
-            "Luma rate limit remained active after a 60-second retry. The run stopped safely; no additional event pages were opened.",
-          logs: latestRateState.logs || [],
-          finishedAt: new Date().toISOString(),
-        };
-        activeRun = null;
-        await saveRunState(stopped);
-        await logRunStep(RUN_STEPS.DONE, stopped.error, "warn");
-        chrome.action.setBadgeText({ text: "■" });
-        chrome.action.setBadgeBackgroundColor({ color: "#71717a" });
-        return stopped;
+      const feedSkip = await shouldSkipFromFeed(event);
+      if (feedSkip) {
+        await recordSkip(event, feedSkip);
+        await appendHistory(feedSkip);
+        continue;
       }
-    } catch (err) {
-      if (err instanceof StopRunError) throw err;
-      const errEntry = {
-        event,
-        success: false,
-        status: "error",
-        message: err.message,
-        timestamp: new Date().toISOString(),
-      };
-      results.push(errEntry);
-      await appendRunLog(
-        createLogEntry(RUN_STEPS.ERROR, err.message, "error", {
-          eventSlug: event.slug,
-          eventTitle: event.title,
-        }),
-        { currentEvent: null, skipRequested: false, results: [...results] }
-      );
-    }
 
-    await chrome.storage.session.set({ currentRunEvent: null });
+      try {
+        await throwIfStoppedAsync();
+        const eventUrl = eventPageUrl(event);
+        if (!isValidEventHref(eventUrl)) {
+          await recordSkip(
+            event,
+            {
+              event,
+              success: false,
+              status: "skipped_invalid",
+              message: "Not an event page — skipped",
+              timestamp: new Date().toISOString(),
+            },
+            "warn"
+          );
+          continue;
+        }
 
-    if (i < events.length - 1) {
-      await interruptibleSleep(REGISTRATION_DELAY_MS + Math.floor(Math.random() * 4000));
+        const preloaded = await swapInPrefetchedTab(eventUrl);
+        if (preloaded) {
+          await logRunStep(RUN_STEPS.NAVIGATE, `Opening preloaded page: ${event.url}`, "info", {
+            eventSlug: event.slug,
+            eventTitle: event.title,
+            eventUrl: event.url,
+          });
+          await waitForTabComplete(tabPool.workTabId);
+        } else {
+          await setCursorOnTab(tabPool.workTabId, `Loading ${index}: ${event.title}`);
+          await logRunStep(RUN_STEPS.NAVIGATE, `Navigating to ${event.url}`, "info", {
+            eventSlug: event.slug,
+            eventTitle: event.title,
+            eventUrl: event.url,
+          });
+          await navigateTab(tabPool.workTabId, eventUrl, !navigated);
+        }
+        navigated = true;
+        await throwIfStoppedAsync();
+        await ensureContentScript(tabPool.workTabId);
+        await setCursorOnTab(tabPool.workTabId, `Event ${index}: ${event.title}`);
+        const result = await registerInTab(tabPool.workTabId, currentProfile, event);
+
+        const entry = { event, ...result, timestamp: new Date().toISOString() };
+        results.push(entry);
+
+        const logLevel = entry.success ? (entry.skipped ? "info" : "success") : "error";
+        await appendRunLog(
+          createLogEntry(
+            entry.skipped ? RUN_STEPS.SKIP : entry.success ? RUN_STEPS.DONE : RUN_STEPS.ERROR,
+            entry.message || entry.status || "Finished",
+            logLevel,
+            { eventSlug: event.slug, eventTitle: event.title, status: entry.status }
+          ),
+          { currentEvent: null, skipRequested: false, results: [...results], upcoming: snapshotUpcoming(queue) }
+        );
+
+        await appendHistory(entry);
+        currentProfile = await getProfile();
+
+        if (entry.status === "rate_limited") {
+          await chrome.storage.session.set({ currentRunEvent: null });
+          queue.closed = true;
+          const { runState: latestRateState = {} } = await chrome.storage.local.get("runState");
+          const stopped = {
+            phase: "stopped",
+            current: results.length,
+            total: results.length + queue.pending.length,
+            results,
+            stats: queue.stats || null,
+            error:
+              "Luma rate limit remained active after a 60-second retry. The run stopped safely; no additional event pages were opened.",
+            logs: latestRateState.logs || [],
+            finishedAt: new Date().toISOString(),
+          };
+          activeRun = null;
+          await saveRunState(stopped);
+          await logRunStep(RUN_STEPS.DONE, stopped.error, "warn");
+          chrome.action.setBadgeText({ text: "■" });
+          chrome.action.setBadgeBackgroundColor({ color: "#71717a" });
+          return stopped;
+        }
+      } catch (err) {
+        if (err instanceof StopRunError) throw err;
+        const errEntry = {
+          event,
+          success: false,
+          status: "error",
+          message: err.message,
+          timestamp: new Date().toISOString(),
+        };
+        results.push(errEntry);
+        await appendRunLog(
+          createLogEntry(RUN_STEPS.ERROR, err.message, "error", {
+            eventSlug: event.slug,
+            eventTitle: event.title,
+          }),
+          { currentEvent: null, skipRequested: false, results: [...results], upcoming: snapshotUpcoming(queue) }
+        );
+      }
+
+      await chrome.storage.session.set({ currentRunEvent: null });
+
+      const moreToCome = queue.pending.length > 0 || !queue.done;
+      if (moreToCome && results.length < maxResults) {
+        // Start loading the next page now so it is ready when the gap ends. Page loads keep the
+        // same spacing as before: one per registration gap.
+        const next = await nextPrefetchCandidate(queue);
+        if (next) {
+          await prefetchEventPage(next);
+          await setCursorOnTab(tabPool.workTabId, `Done — preparing next: ${next.title}`);
+        }
+        await interruptibleSleep(REGISTRATION_DELAY_MS + Math.floor(Math.random() * 4000));
+      }
     }
+  } finally {
+    queue.closed = true;
   }
 
   const stopped = runControl.stopRequested;
   const { runState: latest = {} } = await chrome.storage.local.get("runState");
   const finalState = {
-    phase: stopped ? "stopped" : "done",
+    phase: stopped || haltedByRateLimit ? "stopped" : "done",
     current: results.length,
-    total: events.length,
+    total: results.length + queue.pending.length,
     results,
+    stats: queue.stats || null,
     logs: latest.logs || [],
     finishedAt: new Date().toISOString(),
   };
+  if (haltedByRateLimit) {
+    finalState.error =
+      "Luma rate limit is active. The run stopped safely without opening more event pages. Please try again later.";
+  }
 
   activeRun = null;
   await saveRunState(finalState);
-  await logRunStep(RUN_STEPS.DONE, stopped ? "Run stopped" : `Run complete — ${results.length} events`, "info");
-  chrome.action.setBadgeText({ text: stopped ? "■" : "✓" });
-  chrome.action.setBadgeBackgroundColor({ color: stopped ? "#71717a" : "#22c55e" });
+  await logRunStep(
+    RUN_STEPS.DONE,
+    finalState.error || (stopped ? "Run stopped" : `Run complete — ${results.length} events`),
+    finalState.error ? "warn" : "info"
+  );
+  chrome.action.setBadgeText({ text: finalState.phase === "stopped" ? "■" : "✓" });
+  chrome.action.setBadgeBackgroundColor({ color: finalState.phase === "stopped" ? "#71717a" : "#22c55e" });
 
   return finalState;
 }
@@ -923,7 +1123,9 @@ async function ensureCvScript(tabId) {
  * skips anything already registered.
  */
 async function discoverCerebralValleyEvents(tabId, sessionId) {
-  await interruptibleSleep(2500);
+  const cvTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (cvTab && cvTab.status !== "complete") await waitForTabComplete(tabId);
+  await interruptibleSleep(800);
   throwIfStopped();
   await ensureCvScript(tabId);
 
@@ -1185,78 +1387,102 @@ async function startRun() {
     }
 
     const excludeIds = await getHistoryExcludeIds();
-    const disc = await discoverScrapedEventsWithStats(scraped, MAX_EVENTS, excludeIds);
-    const events = disc.events;
-    const stats = { ...disc.stats, sourceCounts, source: "all" };
-    assertRunSession(sessionId);
-    await throwIfStoppedAsync();
-    await waitIfPaused();
+    const queue = createRunQueue();
+    let lastProgressLogAt = 0;
 
     const perSource = orderedSources
       .map((source) => `${source.label} ${sourceCounts[source.key] || 0}`)
       .join(" · ");
-    await logRunStep(
-      RUN_STEPS.DISCOVER,
-      `Sources synced (${SOURCE_COUNT}): ${perSource}`,
-      "info",
-      { sourceCounts }
-    );
-
-    await logRunStep(
-      RUN_STEPS.DISCOVER,
-      `Found ${stats.totalScraped} unique links · ${stats.hydrated} verified events · ${events.length} selected` +
-        (stats.cacheHits ? ` · ${stats.cacheHits} verified from cache` : ""),
-      "info",
-      { stats }
-    );
-
-    if (stats.rateLimitRetries > 0) {
-      await logRunStep(
-        RUN_STEPS.DISCOVER,
-        `Luma rate limit handled safely (${stats.rateLimitRetries} delayed retry${stats.rateLimitRetries === 1 ? "" : "ies"})`,
-        "warn",
-        { stats }
-      );
-    }
-
-    await saveRunState({
-      phase: "discovering",
-      current: 0,
-      total: MAX_EVENTS,
-      results: [],
-      stats,
-      logs: (await chrome.storage.local.get("runState")).runState?.logs || [],
+    await logRunStep(RUN_STEPS.DISCOVER, `Sources synced (${SOURCE_COUNT}): ${perSource}`, "info", {
+      sourceCounts,
     });
-    activeRun = {
-      phase: "discovering",
-      current: 0,
-      total: MAX_EVENTS,
-      results: [],
-      stats,
-      logs: (await chrome.storage.local.get("runState")).runState?.logs || [],
-    };
 
-    if (stats.rateLimitStopped) {
-      const msg =
-        "Luma rate limit is still active. The run stopped safely without opening more event pages. Please try again later.";
-      const stopped = {
-        phase: "stopped",
-        current: 0,
-        total: events.length,
-        events,
-        results: [],
-        error: msg,
-        stats,
-        logs: (await chrome.storage.local.get("runState")).runState?.logs || [],
-      };
-      await saveRunState(stopped);
-      await logRunStep(RUN_STEPS.DONE, msg, "warn");
-      chrome.action.setBadgeText({ text: "■" });
-      chrome.action.setBadgeBackgroundColor({ color: "#71717a" });
-      return { ok: true, ...stopped };
+    // Verification streams into the queue. Registration starts after the first few confirmed
+    // events instead of after the whole pass; the remaining lookups overlap the registration gaps.
+    const verification = discoverScrapedEventsWithStats(scraped, MAX_EVENTS, excludeIds, {
+      shouldStop: () => runControl.stopRequested || runSessionId !== sessionId || queue.closed,
+      onEvent: (event) => {
+        queuePush(queue, event);
+      },
+      onProgress: async ({ verified, total, ready, found }) => {
+        queue.progress = { verified, total, ready, found, done: false };
+        const now = Date.now();
+        if (verified !== total && now - lastProgressLogAt < 1500) {
+          await patchRunState({ discovery: queue.progress, upcoming: snapshotUpcoming(queue) });
+          return;
+        }
+        lastProgressLogAt = now;
+        await appendRunLog(
+          createLogEntry(
+            RUN_STEPS.DISCOVER,
+            `Verifying ${verified}/${total} links · ${ready} ready to register`,
+            "info"
+          ),
+          { discovery: queue.progress, upcoming: snapshotUpcoming(queue) }
+        );
+      },
+    })
+      .then(async (disc) => {
+        queue.stats = { ...disc.stats, sourceCounts, source: "all" };
+        queue.rateLimitStopped = Boolean(disc.stats.rateLimitStopped);
+        queue.progress = { ...(queue.progress || {}), done: true };
+        queue.done = true;
+        await appendRunLog(
+          createLogEntry(
+            RUN_STEPS.DISCOVER,
+            `Verification complete — ${disc.stats.totalScraped} unique links · ${disc.stats.hydrated} verified events · ${disc.stats.newRegisterable} registerable` +
+              (disc.stats.cacheHits ? ` · ${disc.stats.cacheHits} from cache` : ""),
+            "info",
+            { stats: queue.stats }
+          ),
+          { stats: queue.stats, discovery: queue.progress }
+        );
+        if (disc.stats.rateLimitRetries > 0) {
+          await logRunStep(
+            RUN_STEPS.DISCOVER,
+            `Luma rate limit handled safely (${disc.stats.rateLimitRetries} delayed retry${disc.stats.rateLimitRetries === 1 ? "" : "ies"})`,
+            "warn"
+          );
+        }
+        return disc;
+      })
+      .catch(async (err) => {
+        queue.error = err;
+        queue.done = true;
+        await logRunStep(RUN_STEPS.DISCOVER, `Verification failed: ${err.message}`, "error");
+        return null;
+      });
+
+    await logRunStep(
+      RUN_STEPS.DISCOVER,
+      `Verifying ${scraped.length} links with Luma — registration starts once ${FIRST_BATCH_TO_START} are confirmed…`
+    );
+
+    while (!queue.done && queue.pending.length < FIRST_BATCH_TO_START) {
+      assertRunSession(sessionId);
+      await throwIfStoppedAsync();
+      await waitIfPaused();
+      await interruptibleSleep(300);
     }
+    assertRunSession(sessionId);
+    await throwIfStoppedAsync();
+    await waitIfPaused();
 
-    if (!events.length) {
+    if (queue.done && queue.error) throw queue.error;
+
+    if (queue.done && !queue.pending.length) {
+      const stats = queue.stats || {};
+      const logs = (await chrome.storage.local.get("runState")).runState?.logs || [];
+      if (stats.rateLimitStopped) {
+        const msg =
+          "Luma rate limit is still active. The run stopped safely without opening more event pages. Please try again later.";
+        const stopped = { phase: "stopped", current: 0, total: 0, events: [], results: [], error: msg, stats, logs };
+        await saveRunState(stopped);
+        await logRunStep(RUN_STEPS.DONE, msg, "warn");
+        chrome.action.setBadgeText({ text: "■" });
+        chrome.action.setBadgeBackgroundColor({ color: "#71717a" });
+        return { ok: true, ...stopped };
+      }
       const msg =
         stats.lookupFailed > 0 && stats.hydrated === 0
           ? `Could not verify Luma events (${stats.lookupFailed} lookup failures) — please retry`
@@ -1265,42 +1491,39 @@ async function startRun() {
           : stats.totalSF > 0
             ? `No registerable events after verification (${stats.rejectedNonEvents || 0} non-event pages and ${stats.rejectedIneligible || 0} ineligible events removed)`
             : "No registerable SF events found";
-      const empty = { phase: "done", current: 0, total: 0, results: [], error: msg, stats };
+      const empty = { phase: "done", current: 0, total: 0, results: [], error: msg, stats, logs };
       await saveRunState(empty);
       chrome.action.setBadgeText({ text: "" });
       return { ok: true, ...empty };
     }
 
-    const upcomingList = events.map((e) => ({ title: e.title, slug: e.slug, url: e.url }));
+    const upcomingList = snapshotUpcoming(queue);
     await logRunStep(
       RUN_STEPS.DISCOVER,
-      "Discovery complete — cooling down before opening the first event…",
+      queue.done
+        ? `Discovery complete — ${queue.pending.length} events queued, opening the first…`
+        : `${queue.pending.length} events confirmed — opening the first while verification continues…`,
       "info"
     );
     await interruptibleSleep(POST_DISCOVERY_COOLDOWN_MS);
     await waitIfPaused();
     await throwIfStoppedAsync();
-    await saveRunState({
-      phase: "registering",
-      current: 0,
-      total: events.length,
-      events,
-      results: [],
-      upcoming: upcomingList,
-      stats,
-      logs: (await chrome.storage.local.get("runState")).runState?.logs || [],
-    });
 
-    activeRun = {
+    const registering = {
       phase: "registering",
       current: 0,
-      total: events.length,
+      total: queue.pending.length,
       results: [],
       upcoming: upcomingList,
-      stats,
+      stats: queue.stats || null,
+      discovery: queue.progress || null,
       logs: (await chrome.storage.local.get("runState")).runState?.logs || [],
     };
-    const final = await processRun(events, profile, workTab.id, sessionId);
+    await saveRunState(registering);
+    activeRun = { ...registering };
+
+    const final = await processRun(queue, profile, workTab.id, sessionId);
+    await verification;
     return { ok: true, ...final };
   } catch (err) {
     if (err instanceof StopRunError) {
@@ -1325,7 +1548,7 @@ async function startRun() {
     chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
     return { ok: false, error: err.message };
   } finally {
-    await endAgentRun(workTabId);
+    await finishAgentTabs(workTabId);
     await resetRunControl();
     activeRun = null;
     await closeTabsSafely(auxiliaryTabIds);
@@ -1483,7 +1706,7 @@ async function startInviteRun() {
     chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
     return { ok: false, error: err.message };
   } finally {
-    await endAgentRun(workTabId);
+    await finishAgentTabs(workTabId);
     await resetRunControl();
     activeRun = null;
   }

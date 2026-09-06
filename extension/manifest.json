@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Luma Agent",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Scan curated SF event sources and auto-register for Luma events",
   "permissions": [
     "storage",

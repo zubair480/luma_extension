@@ -246,10 +246,14 @@ async function fillMultiSelectKeyboard(activator, label, profile, multi, log) {
 
 async function fillTextFieldAgent(field, profile, eventTitle, log) {
   const label = field.label;
-  const qType = classifyQuestion(label);
-  let value = answerForQuestion(label, profile);
+  const attrType = field.attrType || classifyByInputAttributes(field.el);
+  const labelType = classifyQuestion(label);
+  // The control's own attributes beat the label text: an input[type=tel] is a phone field no
+  // matter what the nearby copy says, and a plain textarea never receives a phone number.
+  const qType = attrType || labelType;
+  let value = answerForQuestion(label, profile, attrType);
 
-  if (!value && (needsSmartAnswer(qType, label) || qType === "custom")) {
+  if (!value && !attrType && (needsSmartAnswer(qType, label) || qType === "custom")) {
     value = await requestFieldAnswer(
       label,
       profile,
@@ -259,10 +263,21 @@ async function fillTextFieldAgent(field, profile, eventTitle, log) {
     );
   }
 
-  if (!value) return null;
+  if (!value) {
+    if (attrType) log("fill", `No profile value for ${attrType} field "${trimStatus(label, 40)}" — left empty`, "info");
+    return null;
+  }
+
+  if (!valueFitsInput(field.el, value)) {
+    log("fill", `Skipped "${trimStatus(label, 40)}": value does not fit a ${(field.el.getAttribute("type") || "text")} field`, "warn", {
+      qType,
+      attrType,
+    });
+    return null;
+  }
 
   await setNativeValueVisual(field.el, value, label);
-  return { question: label, answer: value, fromLlm: qType === "custom" };
+  return { question: label, answer: value, fromLlm: !attrType && qType === "custom" };
 }
 
 async function fillSelectFieldAgent(field, profile, eventTitle, log) {

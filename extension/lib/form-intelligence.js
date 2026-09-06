@@ -321,17 +321,17 @@ function classifyQuestion(label) {
     return "work_email";
   }
   if (/email|e-mail/.test(l)) return "email";
-  if (/phone|mobile|tel/.test(l)) return "phone";
+  if (/\b(phone|mobile|tel|telephone|cell|whatsapp)\b|\bphone number\b|\bcontact number\b/.test(l)) return "phone";
   if (/linkedin/.test(l)) return "linkedin";
   if (/github/.test(l)) return "github";
   if (/twitter|x\/twitter|x handle|x profile|x \(formerly/.test(l)) return "twitter";
-  if (/company|organization|employer|school|university|institution/.test(l) && !/role|title|kind/.test(l)) {
+  if (/company|organization|employer|school|university|institution/.test(l) && !/role|title|kind|website|\burl\b|link|portfolio/.test(l)) {
     return "company";
   }
   if (/job title|^title$|your title|position at/.test(l) && !/kind of role|best describes/.test(l)) {
     return "job_title";
   }
-  if (/city|location|where are you based|which city|what city|based in|where do you live|where are you located/.test(l)) {
+  if (/\bcity\b|\blocation\b|where are you based|which city|what city|based in|where do you live|where are you located/.test(l)) {
     return "location";
   }
   if (/member of.*community|part of.*community|community member|our community|join our community/.test(l)) {
@@ -355,26 +355,137 @@ function classifyQuestion(label) {
   if (/fundrais|funding round|funding stage|\bfunding\b|raising (a )?(round|money|capital)|currently raising|are you raising|seeking investment|series [a-e]\b|pre-?seed|\bseed round\b/.test(l)) {
     return "fundraising";
   }
-  if (/why|what brings|tell us about|about yourself|interest|motivation|what do you hope/.test(l)) {
+  if (/\bwhy\b|what brings|tell us about|about yourself|\binterest|motivation|what do you hope/.test(l)) {
     return "motivation";
   }
   return "custom";
 }
 
-function answerForQuestion(label, profile) {
-  const type = classifyQuestion(label);
-  const defaults = profile.default_answers || {};
+/**
+ * Classify a control from its own attributes (type / autocomplete / inputmode / name / id).
+ * These come from the form author and are far more reliable than nearby label text, so they
+ * take precedence over label classification when present.
+ */
+function classifyByInputAttributes(el) {
+  if (!el || typeof el.getAttribute !== "function") return null;
+  const type = (el.getAttribute("type") || "").toLowerCase();
+  const auto = (el.getAttribute("autocomplete") || "").toLowerCase();
+  const mode = (el.getAttribute("inputmode") || "").toLowerCase();
+  const nameId = `${el.getAttribute("name") || ""} ${el.getAttribute("id") || ""}`.toLowerCase();
+
+  if (type === "tel" || mode === "tel" || /\btel\b|tel-national|tel-local/.test(auto)) return "phone";
+  if (type === "email" || mode === "email" || auto === "email") return "email";
+  if (auto === "given-name") return "first_name";
+  if (auto === "family-name") return "last_name";
+  if (auto === "name") return "full_name";
+  if (auto === "organization") return "company";
+  if (auto === "organization-title") return "job_title";
+  if (auto === "address-level2") return "location";
+  if (type === "url" || mode === "url" || auto === "url") {
+    if (/linkedin/.test(nameId)) return "linkedin";
+    if (/github/.test(nameId)) return "github";
+    if (/twitter|x_handle|xhandle/.test(nameId)) return "twitter";
+    return "website";
+  }
+  if (/\bphone\b|\bmobile\b|\btelephone\b/.test(nameId)) return "phone";
+  if (/\bemail\b/.test(nameId)) return "email";
+  if (/\bfirst_?name\b|\bfname\b/.test(nameId)) return "first_name";
+  if (/\blast_?name\b|\blname\b|\bsurname\b/.test(nameId)) return "last_name";
+  if (/\blinkedin\b/.test(nameId)) return "linkedin";
+  if (/\bcompany\b|\borganization\b/.test(nameId)) return "company";
+  return null;
+}
+
+/** True when an input belongs to a custom dropdown (combobox search box, read-only trigger). */
+function isCustomSelectInput(el) {
+  if (!el || typeof el.getAttribute !== "function") return false;
+  const tag = el.tagName;
+  if (tag !== "INPUT" && tag !== "TEXTAREA") return false;
+  const type = (el.getAttribute("type") || "text").toLowerCase();
+  const role = (el.getAttribute("role") || "").toLowerCase();
+  if (el.readOnly) return true;
+  if (role === "combobox" || role === "listbox" || role === "searchbox") return true;
+  if (el.getAttribute("aria-autocomplete") || el.getAttribute("aria-haspopup")) return true;
+  if (el.getAttribute("aria-expanded") != null) return true;
+  const controls = el.getAttribute("aria-controls");
+  if (controls && /listbox|menu|options|select/i.test(controls)) return true;
+  if (type === "search" && el.closest?.('[role="combobox"], [role="listbox"], [aria-haspopup], [data-state]')) return true;
+  if (
+    el.closest?.(
+      '[role="combobox"], [role="listbox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], [class*="select__" i], [class*="react-select" i], [data-radix-select-trigger], [data-radix-select-content]'
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Shape check: never write a value the control's own type would reject or that is plainly wrong. */
+function valueFitsInput(el, value) {
+  if (!el || value == null) return false;
+  const v = String(value).trim();
+  if (!v) return false;
+  const type = (el.getAttribute?.("type") || "text").toLowerCase();
+  const mode = (el.getAttribute?.("inputmode") || "").toLowerCase();
+  const maxLen = Number(el.getAttribute?.("maxlength") || 0);
+  if (maxLen > 0 && v.length > maxLen) return false;
+  if (type === "email") return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+  if (type === "tel" || mode === "tel") return /^[+\d][\d\s().-]{5,}$/.test(v);
+  if (type === "url") return /^(https?:\/\/)?[\w.-]+\.[a-z]{2,}(\/\S*)?$/i.test(v);
+  if (type === "number" || mode === "numeric" || mode === "decimal") return /^-?\d+([.,]\d+)?$/.test(v);
+  // A phone number must not land in a field whose own attributes say it is something else.
+  const looksLikePhone = /^[+\d][\d\s().-]{6,}$/.test(v) && (v.match(/\d/g) || []).length >= 7;
+  if (looksLikePhone && type !== "tel" && mode !== "tel") {
+    const hint = `${el.getAttribute?.("aria-label") || ""} ${el.getAttribute?.("placeholder") || ""} ${el.getAttribute?.("name") || ""}`.toLowerCase();
+    if (!/phone|mobile|tel|cell|whatsapp|number/.test(hint)) return false;
+  }
+  return true;
+}
+
+/** Word-level overlap between a form label and a saved question key (0..1). */
+function labelSimilarity(a, b) {
+  const tok = (t) =>
+    new Set(
+      (t || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 2 && !/^(the|and|for|you|your|are|what|which|this|that|with|from|our|please|any)$/.test(w))
+    );
+  const A = tok(a);
+  const B = tok(b);
+  if (!A.size || !B.size) return 0;
+  let shared = 0;
+  for (const w of A) if (B.has(w)) shared++;
+  return shared / Math.max(A.size, B.size);
+}
+
+function answerForQuestion(label, profile, forcedType = null) {
+  const type = forcedType || classifyQuestion(label);
+  // A control with a strongly typed attribute (type=tel, autocomplete=email, …) answers only from
+  // the matching profile field; saved free-text answers are never written into it.
+  const defaults = forcedType ? {} : profile.default_answers || {};
 
   // Match a saved answer to the form label, but require a substantial overlap so short labels
   // (e.g. "title", "book") don't accidentally match a long saved question key as a substring.
   const lClean = label.toLowerCase().replace(/\*/g, "").trim();
+  let bestSaved = null;
+  let bestScore = 0;
   for (const [question, answer] of Object.entries(defaults)) {
-    const q = question.toLowerCase().trim();
-    if (!q) continue;
+    const q = question.toLowerCase().replace(/\*/g, "").trim();
+    if (!q || !answer) continue;
     if (lClean === q) return answer;
-    if (q.length >= 6 && lClean.includes(q)) return answer;
-    if (lClean.length >= 6 && q.includes(lClean)) return answer;
+    // Substring matches are only trusted when the saved key is a whole question, not a bare
+    // word such as "company" that would also match "company website".
+    const containment =
+      (q.length >= 12 && lClean.includes(q)) || (lClean.length >= 12 && q.includes(lClean));
+    const score = containment ? 0.95 : labelSimilarity(lClean, q);
+    if (score > bestScore) {
+      bestScore = score;
+      bestSaved = answer;
+    }
   }
+  if (bestSaved && bestScore >= 0.6) return bestSaved;
 
   switch (type) {
     case "first_name": return profile.first_name;
@@ -1121,13 +1232,39 @@ function getFieldLabel(el, doc = document) {
   const placeholder = el.getAttribute("placeholder");
   if (placeholder) return cleanLabel(placeholder);
 
+  const labelledBy = el.getAttribute("aria-labelledby");
+  if (labelledBy && typeof doc.getElementById === "function") {
+    const parts = labelledBy
+      .split(/\s+/)
+      .map((lid) => doc.getElementById(lid)?.textContent?.trim())
+      .filter(Boolean);
+    if (parts.length) return cleanLabel(parts.join(" "));
+  }
+
+  const CONTROL_SEL = "input:not([type='hidden']), textarea, select, [role='combobox']";
   let parent = el.closest("label, [class*='question'], [class*='field'], fieldset, div");
-  for (let i = 0; i < 5 && parent; i++) {
-    const labelEl = parent.querySelector("label, legend, [class*='label'], p, span");
-    if (labelEl && labelEl !== el) {
-      const text = cleanLabel(labelEl.textContent);
+  for (let i = 0; i < 6 && parent; i++) {
+    const controls = [...parent.querySelectorAll(CONTROL_SEL)].filter(
+      (c) => c !== el && !el.contains(c) && !c.contains(el)
+    );
+    const candidates = [...parent.querySelectorAll("label, legend, [class*='label'], p, span, h3, h4")].filter(
+      (node) => node !== el && !el.contains(node) && !node.contains(el)
+    );
+    // Walk the candidates that PRECEDE the control, nearest first, and stop at the first one that
+    // has another form control between it and ours — that label belongs to the other control.
+    const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+    const before = (a, b) => Boolean(a.compareDocumentPosition(b) & FOLLOWING);
+    for (let c = candidates.length - 1; c >= 0; c--) {
+      const node = candidates[c];
+      if (!before(node, el)) continue;
+      const blocked = controls.some((ctrl) => before(node, ctrl) && before(ctrl, el));
+      if (blocked) break;
+      const text = cleanLabel(node.textContent);
       if (text.length > 3 && text.length < 300) return text;
     }
+    // A container that already holds other controls is the form itself; going higher would only
+    // find labels that belong to other fields.
+    if (controls.length > 0) break;
     parent = parent.parentElement;
   }
 

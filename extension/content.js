@@ -564,7 +564,7 @@ async function selectTicketType(profile, log = () => {}) {
       if (heading === pref || heading.startsWith(`${pref} `)) {
         log("ticket", `Selecting in-person ticket (${heading})`);
         await agentClick(el, "Selecting in-person ticket…", log, "ticket");
-        await runAwareSleep(800);
+        await runAwareSleep(500);
         return true;
       }
     }
@@ -585,7 +585,7 @@ async function selectTicketType(profile, log = () => {}) {
       if (heading === pref || heading.startsWith(`${pref} `)) {
         log("ticket", `Selecting ticket type (${heading})`);
         await agentClick(el, "Selecting ticket type…", log, "ticket");
-        await runAwareSleep(800);
+        await runAwareSleep(500);
         return true;
       }
     }
@@ -869,19 +869,31 @@ async function fillFieldsByLabelScan(profile, newAnswers) {
       labelEl.closest("[class*='question'], [class*='field'], fieldset, form, div") || labelEl.parentElement;
     if (!container) continue;
 
-    for (const input of container.querySelectorAll("input, textarea")) {
+    // This pass exists for inputs the scanner could not label. A container holding several
+    // controls is the form itself, and writing this label's answer into every empty input there
+    // is exactly how a phone number ends up in the wrong box.
+    const inputs = [...container.querySelectorAll("input, textarea")].filter((input) => {
       const type = (input.getAttribute("type") || "text").toLowerCase();
-      if (["hidden", "checkbox", "radio", "file", "submit", "button"].includes(type)) continue;
-      if (!isVisible(input) || input.value?.trim()) continue;
+      if (["hidden", "checkbox", "radio", "file", "submit", "button"].includes(type)) return false;
+      return isVisible(input);
+    });
+    if (inputs.length !== 1) continue;
+    const input = inputs[0];
+    if (input.value?.trim() || isCustomSelectInput(input)) continue;
 
-      const fieldType = input.tagName === "TEXTAREA" ? "textarea" : "text";
-      const { value, fromLlm } = await resolveSmartAnswer(text, profile, fieldType);
-      if (!value) continue;
+    const own = extractFieldLabel(input);
+    if (own && own.length >= 3 && own !== text) continue;
 
-      await setNativeValueVisual(input, value, text);
-      filled++;
-      newAnswers.push({ question: text, answer: value, fromLlm });
-    }
+    const attrType = classifyByInputAttributes(input);
+    const fieldType = input.tagName === "TEXTAREA" ? "textarea" : "text";
+    const { value, fromLlm } = attrType
+      ? { value: answerForQuestion(text, profile, attrType), fromLlm: false }
+      : await resolveSmartAnswer(text, profile, fieldType);
+    if (!value || !valueFitsInput(input, value)) continue;
+
+    await setNativeValueVisual(input, value, text);
+    filled++;
+    newAnswers.push({ question: text, answer: value, fromLlm });
   }
 
   return filled;
@@ -898,9 +910,11 @@ async function fillForm(profile) {
     if (["hidden", "checkbox", "radio", "file", "submit", "button"].includes(type)) continue;
     if (!isVisible(field)) continue;
     if (field.value?.trim()) continue;
+    if (field.tagName !== "SELECT" && isCustomSelectInput(field)) continue;
 
-    const label = getFieldLabel(field);
-    const qType = classifyQuestion(label);
+    const label = extractFieldLabel(field);
+    const attrType = classifyByInputAttributes(field);
+    const qType = attrType || classifyQuestion(label);
 
     if (field.tagName === "SELECT") {
       const result = await fillNativeSelect(field, label, profile);
@@ -913,11 +927,11 @@ async function fillForm(profile) {
       continue;
     }
 
-    let value = answerForQuestion(label, profile);
+    let value = answerForQuestion(label, profile, attrType);
     let isNew = false;
     let fromLlm = false;
 
-    if (!value) {
+    if (!value && !attrType) {
       const fieldType = field.tagName === "TEXTAREA" ? "textarea" : "text";
       const resolved = await resolveSmartAnswer(label, profile, fieldType);
       value = resolved.value;
@@ -925,7 +939,7 @@ async function fillForm(profile) {
       isNew = Boolean(value && (resolved.qType === "custom" || fromLlm));
     }
 
-    if (!value) continue;
+    if (!value || !valueFitsInput(field, value)) continue;
 
     await setNativeValueVisual(field, value, label || qType);
     filled++;
@@ -1094,6 +1108,31 @@ function isNewRegistrationSuccess(mode = "standard") {
   return null;
 }
 
+/**
+ * Wait until the registration UI has reacted to a click — the modal mounted, a sign-in prompt
+ * appeared, or the page already shows a registered state — instead of sleeping a fixed 1.2s.
+ */
+async function waitForRegistrationUi(maxMs = 1500, stepMs = 100) {
+  const started = Date.now();
+  while (Date.now() - started < maxMs) {
+    if (getRegistrationModalRoot() || isLoginRequired() || detectExistingRegistration(true)) break;
+    await runAwareSleep(stepMs);
+  }
+  await runAwareSleep(150);
+}
+
+/** Poll for the post-submit outcome instead of a flat 1.8s wait; returns as soon as it is known. */
+async function waitForSubmitOutcome(mode, maxMs = 2500, stepMs = 250) {
+  const started = Date.now();
+  while (Date.now() - started < maxMs) {
+    const success = isNewRegistrationSuccess(mode);
+    if (success) return success;
+    if (requiresWallet() || detectExistingRegistration(false)) return null;
+    await runAwareSleep(stepMs);
+  }
+  return isNewRegistrationSuccess(mode);
+}
+
 async function clickPrimaryAction(mode = "standard", log = () => {}) {
   // The registration modal does not exist yet, so page-level CTA buttons must not be rejected by
   // form-scope safety checks. Navigation-link safety still remains enabled.
@@ -1120,7 +1159,7 @@ async function clickPrimaryAction(mode = "standard", log = () => {}) {
     { checkFormScope: false }
   );
   if (!clicked) return false;
-  await runAwareSleep(1200);
+  await waitForRegistrationUi(1500);
   return true;
 }
 
@@ -1137,7 +1176,7 @@ async function clickSubmit(mode = "standard", log = () => {}) {
   };
   const clicked = await agentClick(btn, labels[mode] || "Submitting…", log, "submit");
   if (!clicked) return false;
-  await runAwareSleep(1600);
+  await runAwareSleep(900);
   return true;
 }
 
@@ -1184,7 +1223,7 @@ async function registerOnPage(profile, keepCursor = false, eventMeta = {}) {
   log("preflight", `Starting: ${eventMeta.title || "event"}`, "info", { url: expectedEventUrl });
 
   try {
-  await runAwareSleep(800);
+  await runAwareSleep(300);
   await guardEventPage(expectedEventUrl, log, "preflight");
 
   if (await refreshAbortFromSession()) return abortedResult();
@@ -1299,7 +1338,7 @@ async function registerOnPage(profile, keepCursor = false, eventMeta = {}) {
     }
   }
 
-  await runAwareSleep(1200);
+  await waitForRegistrationUi(1200);
 
   if (isLoginRequired()) {
     log("preflight", "Sign-in prompt opened", "warn");
@@ -1353,10 +1392,8 @@ async function registerOnPage(profile, keepCursor = false, eventMeta = {}) {
       continue;
     }
 
-    await runAwareSleep(1800);
-
     log("verify", "Checking registration result…");
-    const success = isNewRegistrationSuccess(mode);
+    const success = await waitForSubmitOutcome(mode, 2500);
     if (success) {
       log("done", success.message || "Registration complete", "success");
       setAgentStatus(success.message || "Done!");
@@ -1715,7 +1752,7 @@ async function scanDiscoverPageFeedWithScroll() {
 
   for (let i = 0; i < 15; i++) {
     window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" });
-    await sleep(700);
+    await sleep(450);
     if (isRateLimitPage()) {
       window.scrollTo({ top: 0, behavior: "instant" });
       return { skipUrls: {}, prioritySlugs: [], eventLinks: [], rateLimited: true };
