@@ -7,6 +7,8 @@ let cursorRing = null;
 let statusBar = null;
 let fieldHighlight = null;
 let cursorActive = false;
+// Fast mode: the status bar and field highlight stay, the pointer animation and its waits go.
+let cursorMotion = true;
 let cursorX = window.innerWidth / 2;
 let cursorY = window.innerHeight / 2;
 
@@ -120,6 +122,14 @@ function ensureCursorUi() {
   cursorRoot.appendChild(cursorPointer);
   cursorRoot.appendChild(statusBar);
   document.documentElement.appendChild(cursorRoot);
+  setCursorMotion(cursorMotion);
+}
+
+function setCursorMotion(on) {
+  cursorMotion = Boolean(on);
+  const display = cursorMotion ? "" : "none";
+  if (cursorPointer) cursorPointer.style.display = display;
+  if (cursorRing) cursorRing.style.display = display;
 }
 
 function setCursorPosition(x, y) {
@@ -183,6 +193,12 @@ function setAgentStatus(message) {
 
 async function moveCursorTo(el) {
   if (!el || !cursorActive) return;
+  if (!cursorMotion) {
+    el.scrollIntoView({ block: "center", inline: "nearest" });
+    const { x, y } = elementCenter(el);
+    setCursorPosition(x, y);
+    return;
+  }
   el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
   await new Promise((r) => setTimeout(r, 200));
   const { x, y } = elementCenter(el);
@@ -203,14 +219,15 @@ async function visualClick(el, message, opts = {}) {
   }
 
   if (message) setAgentStatus(message);
+  const quick = opts.quick || !cursorMotion;
   if (cursorActive) {
-    if (opts.quick) {
+    if (quick) {
       el.scrollIntoView({ block: "nearest", inline: "nearest" });
       const { x, y, rect } = elementCenter(el);
       if (rect.width > 0 || rect.height > 0) {
         setCursorPosition(x, y);
         highlightElement(el);
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, cursorMotion ? 100 : 30));
       }
     } else {
       await moveCursorTo(el);
@@ -229,7 +246,7 @@ async function visualClick(el, message, opts = {}) {
 
   if (typeof simulatePointerClick === "function") simulatePointerClick(el);
   else if (typeof el.click === "function") el.click();
-  await new Promise((r) => setTimeout(r, opts.quick ? 80 : 120));
+  await new Promise((r) => setTimeout(r, quick ? (cursorMotion ? 80 : 40) : 120));
   return { ok: true, tag: el.tagName, text: (el.textContent || el.value || "").trim().slice(0, 80) };
 }
 
@@ -239,7 +256,7 @@ async function visualFillField(el, message) {
   if (cursorActive) {
     await moveCursorTo(el);
     highlightElement(el);
-    await new Promise((r) => setTimeout(r, 120));
+    if (cursorMotion) await new Promise((r) => setTimeout(r, 120));
   }
 }
 

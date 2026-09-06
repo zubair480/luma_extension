@@ -244,6 +244,41 @@ async function fillMultiSelectKeyboard(activator, label, profile, multi, log) {
   return picked;
 }
 
+/** True for a pending free-text field the profile cannot answer on its own. */
+function needsModelAnswer(field, profile) {
+  if (field.kind !== "text" && field.kind !== "textarea") return false;
+  if (field.filled || fieldHasValue(field.el, field.kind)) return false;
+  if (field.attrType || classifyByInputAttributes(field.el)) return false;
+  if (answerForQuestion(field.label, profile)) return false;
+  const qType = classifyQuestion(field.label);
+  return needsSmartAnswer(qType, field.label) || qType === "custom";
+}
+
+/**
+ * Fire every model-answered question at once, keyed by field id, so the answers are being
+ * produced while the typed fields are filled instead of one at a time when each is reached.
+ */
+function queueSmartAnswers(fields, jobs, profile, eventTitle, log) {
+  const fresh = fields.filter((f) => !jobs.has(f.fid) && needsModelAnswer(f, profile));
+  if (!fresh.length) return;
+  for (const field of fresh) {
+    const qType = classifyQuestion(field.label);
+    jobs.set(
+      field.fid,
+      requestFieldAnswer(
+        field.label,
+        profile,
+        eventTitle,
+        field.kind === "textarea" ? "textarea" : "text",
+        qType
+      ).catch(() => null)
+    );
+  }
+  log("fill", `Asking AI for ${fresh.length} question${fresh.length === 1 ? "" : "s"} in the background`, "info", {
+    questions: fresh.slice(0, 6).map((f) => trimStatus(f.label, 50)),
+  });
+}
+
 async function fillTextFieldAgent(field, profile, eventTitle, log) {
   const label = field.label;
   const attrType = field.attrType || classifyByInputAttributes(field.el);
@@ -253,7 +288,12 @@ async function fillTextFieldAgent(field, profile, eventTitle, log) {
   const qType = attrType || labelType;
   let value = answerForQuestion(label, profile, attrType);
 
-  if (!value && !attrType && (needsSmartAnswer(qType, label) || qType === "custom")) {
+  if (!value && !attrType && field.answerPromise) {
+    setAgentStatus(`Waiting for AI: ${trimStatus(label, 40)}`);
+    value = await field.answerPromise;
+  }
+
+  if (!value && !attrType && !field.answerPromise && (needsSmartAnswer(qType, label) || qType === "custom")) {
     value = await requestFieldAnswer(
       label,
       profile,
@@ -416,6 +456,7 @@ async function fillOneFieldAgent(field, profile, eventTitle, log) {
  */
 async function runFormAgent(profile, eventTitle, log = () => {}) {
   const answers = [];
+  const answerJobs = new Map();
   let filledCount = 0;
 
   for (let round = 0; round < 4; round++) {
@@ -426,8 +467,11 @@ async function runFormAgent(profile, eventTitle, log = () => {}) {
 
     if (!summary.pending) break;
 
+    queueSmartAnswers(fields, answerJobs, profile, eventTitle, log);
+
     for (const field of fields.filter((f) => !f.filled && !fieldHasValue(f.el, f.kind))) {
       await throwIfAborted();
+      field.answerPromise = answerJobs.get(field.fid) || null;
       const result = await fillOneFieldAgent(field, profile, eventTitle, log);
       if (result) {
         answers.push(result);

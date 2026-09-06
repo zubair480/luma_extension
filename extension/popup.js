@@ -463,6 +463,27 @@ function getLlmConfigFromForm() {
   };
 }
 
+const fastModeToggle = document.getElementById("fastModeToggle");
+
+async function loadAgentSettings() {
+  try {
+    const { agentSettings = {} } = await chrome.storage.local.get("agentSettings");
+    fastModeToggle.checked = Boolean(agentSettings.fastMode);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+fastModeToggle.addEventListener("change", async () => {
+  const { agentSettings = {} } = await chrome.storage.local.get("agentSettings");
+  await chrome.storage.local.set({
+    agentSettings: { ...agentSettings, fastMode: fastModeToggle.checked },
+  });
+  showControlToast(fastModeToggle.checked ? "Fast mode on — applies from the next event" : "Fast mode off");
+});
+
+loadAgentSettings();
+
 function showControlToast(text, isError = false) {
   const toast = document.createElement("div");
   toast.className = "saved-toast";

@@ -100,9 +100,21 @@ adding events).
 | Waiting for the page and the registration modal | Polled until the content script answers (400ms floor, 3s ceiling), and the modal / sign-in prompt / result text is polled every 100–250ms instead of fixed 1.2s and 1.8s sleeps. |
 | Cerebral Valley detail pages | Resolved four at a time with background requests to the page HTML; only pages whose HTML lacks the link fall back to a tab load, and those are capped. Bounded to that source's fair share of the batch. |
 | On-device model cold start (up to two minutes) | Warm-up begins the moment a run starts, so it overlaps discovery instead of the first custom question. |
+| Free-text questions answered by the model | Every model-answered question on a form is fired at once when the form is scanned, so answers are produced while the typed fields are filled. Local-model requests are queued on one lane (the WASM pipeline is single-threaded); cloud providers run in parallel. |
+| Lookups for events already handled | Slugs in the history exclusion index, and feed cards already marked Going or Pending, are dropped before verification instead of after a 1.2s lookup. |
+| Cursor animation (about half a second per field) | **Fast mode** in the panel keeps the status bar and field highlight but skips the pointer motion and its waits. Applies from the next event. |
 
-The gap between registrations (`REGISTRATION_DELAY_MS`, 12s) is deliberate and is **not** tuned
-down: Luma rate limits end a run, and the recovery costs far more than the delay saves.
+### Pacing
+
+Luma rate-limits page loads, so spacing is measured **between page loads** rather than as a fixed
+pause after each registration. `REGISTRATION_DELAY_MS` (12s) is the minimum spacing; the next
+event's page is preloaded in the second tab as soon as that spacing has elapsed — usually while the
+current registration is still running — and the loop moves on the moment the current one finishes.
+A registration that takes longer than the spacing therefore costs no extra wait at all. The first
+time Luma asks us to slow down, the spacing doubles (up to 60s) for the rest of the run.
+
+A 30-second keep-alive alarm runs for the duration of a run so Manifest V3 does not suspend the
+background worker mid-batch.
 
 ## Field filling
 

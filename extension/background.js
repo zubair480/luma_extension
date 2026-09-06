@@ -490,11 +490,13 @@ async function registerInTab(tabId, profile, event = {}) {
 
   for (let rateLimitAttempt = 0; rateLimitAttempt < 2; rateLimitAttempt++) {
     const { agentCursorActive } = await chrome.storage.session.get("agentCursorActive");
+    const { agentSettings = {} } = await chrome.storage.local.get("agentSettings");
     const result = await waitForStopWhile(
       chrome.tabs.sendMessage(tabId, {
         type: "REGISTER",
         profile,
         keepCursor: Boolean(agentCursorActive),
+        fastMode: Boolean(agentSettings.fastMode),
         event: {
           title: event.title,
           slug: event.slug,
@@ -519,7 +521,7 @@ async function registerInTab(tabId, profile, event = {}) {
 
     if (result?.status !== "rate_limited" || rateLimitAttempt === 1) {
       if (result?.newAnswers?.length) await mergeProfileAnswers(result.newAnswers);
-      return result;
+      return rateLimitAttempt > 0 && result ? { ...result, rateLimitRetried: true } : result;
     }
 
     await logRunStep(
@@ -582,7 +584,40 @@ async function openSidePanel(windowId) {
   }
 }
 
+/**
+ * Manifest V3 may suspend the service worker during a long run. A 30-second alarm keeps it
+ * awake for as long as a run is in progress and clears itself once the run has ended.
+ */
+const KEEPALIVE_ALARM = "luma-agent-keepalive";
+
+async function startKeepAlive() {
+  try {
+    await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+  } catch {
+    /* alarms unavailable */
+  }
+}
+
+async function stopKeepAlive() {
+  try {
+    await chrome.alarms.clear(KEEPALIVE_ALARM);
+  } catch {
+    /* nothing to clear */
+  }
+}
+
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  chrome.storage.session
+    .get("runInProgress")
+    .then(({ runInProgress }) => {
+      if (!runInProgress) stopKeepAlive();
+    })
+    .catch(() => {});
+});
+
 async function beginAgentRun(workTab) {
+  await startKeepAlive();
   await setSessionRunControl({
     agentCursorActive: true,
     workTabId: workTab.id,
@@ -597,6 +632,7 @@ async function beginAgentRun(workTab) {
 }
 
 async function endAgentRun(tabId) {
+  await stopKeepAlive();
   await setSessionRunControl({
     agentCursorActive: false,
     workTabId: null,
@@ -900,6 +936,35 @@ async function processRun(
   let waitingLogged = false;
   let haltedByRateLimit = false;
 
+  // Page loads are what Luma rate-limits, so spacing is measured between page loads — not as a
+  // fixed pause after each registration. Registration itself usually exceeds the spacing, so the
+  // next page is preloaded mid-registration and the run moves on as soon as this one finishes.
+  // Spacing doubles for the rest of the run the first time Luma asks us to slow down.
+  const pacing = { spacingMs: REGISTRATION_DELAY_MS, lastLoadAt: 0 };
+  const notePageLoad = () => {
+    pacing.lastLoadAt = Date.now();
+  };
+  const spacingRemaining = () =>
+    Math.max(0, pacing.lastLoadAt + pacing.spacingMs + Math.floor(Math.random() * 2000) - Date.now());
+  const waitForLoadSpacing = async () => {
+    const wait = spacingRemaining();
+    if (wait > 0) await interruptibleSleep(wait);
+  };
+  const schedulePreload = () =>
+    (async () => {
+      try {
+        await waitForLoadSpacing();
+        if (queue.closed || results.length + 1 >= maxResults) return;
+        if (!queue.pending.length && queue.done) return;
+        const next = await nextPrefetchCandidate(queue);
+        if (!next) return;
+        await prefetchEventPage(next);
+        notePageLoad();
+      } catch {
+        /* a Stop mid-wait is handled by the main loop */
+      }
+    })();
+
   const recordSkip = async (event, skip, level = "info") => {
     results.push(skip);
     await appendRunLog(
@@ -947,6 +1012,7 @@ async function processRun(
 
       const event = queueTake(queue, tabPool.prefetchSlug);
       index += 1;
+      let preload = null;
       const knownTotal = results.length + 1 + queue.pending.length;
       await chrome.storage.session.set({ currentRunEvent: event });
 
@@ -1017,11 +1083,13 @@ async function processRun(
             // A source tab usually frees up within seconds; reuse it rather than opening another.
             await Promise.race([workTabReady.catch(() => null), interruptibleSleep(15000)]);
           }
+          await waitForLoadSpacing();
           await logRunStep(RUN_STEPS.NAVIGATE, `Navigating to ${event.url}`, "info", {
             eventSlug: event.slug,
             eventTitle: event.title,
             eventUrl: event.url,
           });
+          notePageLoad();
           if (!tabPool.workTabId) {
             const created = await chrome.tabs.create({ url: eventUrl, active: true });
             tabPool.workTabId = created.id;
@@ -1036,7 +1104,17 @@ async function processRun(
         await throwIfStoppedAsync();
         await ensureContentScript(tabPool.workTabId);
         await setCursorOnTab(tabPool.workTabId, `Event ${index}: ${event.title}`);
+        preload = schedulePreload();
         const result = await registerInTab(tabPool.workTabId, currentProfile, event);
+
+        if (result?.rateLimitRetried) {
+          pacing.spacingMs = Math.min(60000, pacing.spacingMs * 2);
+          await logRunStep(
+            RUN_STEPS.NAVIGATE,
+            `Luma asked us to slow down — page loads now at least ${Math.round(pacing.spacingMs / 1000)}s apart for the rest of this run`,
+            "warn"
+          );
+        }
 
         const entry = { event, ...result, timestamp: new Date().toISOString() };
         results.push(entry);
@@ -1098,16 +1176,12 @@ async function processRun(
 
       await chrome.storage.session.set({ currentRunEvent: null });
 
-      const moreToCome = queue.pending.length > 0 || !queue.done;
-      if (moreToCome && results.length < maxResults) {
-        // Start loading the next page now so it is ready when the gap ends. Page loads keep the
-        // same spacing as before: one per registration gap.
-        const next = await nextPrefetchCandidate(queue);
-        if (next) {
-          await prefetchEventPage(next);
-          await setCursorOnTab(tabPool.workTabId, `Done — preparing next: ${next.title}`);
-        }
-        await interruptibleSleep(REGISTRATION_DELAY_MS + Math.floor(Math.random() * 4000));
+      // If this registration finished before the spacing elapsed, this is where the remainder
+      // is waited out; otherwise the next page is already loaded and the loop moves on at once.
+      if (preload) {
+        await setCursorOnTab(tabPool.workTabId, "Done — moving to the next event…");
+        await preload;
+        await throwIfStoppedAsync();
       }
     }
   } finally {
@@ -1481,8 +1555,8 @@ async function startRun() {
         onEvent: (event) => {
           queuePush(queue, event);
         },
-        onProgress: async ({ verified, total, ready, found }) => {
-          Object.assign(pipeline, { verified, links: total, ready, found });
+        onProgress: async ({ verified, total, ready, found, skippedKnown }) => {
+          Object.assign(pipeline, { verified, links: total, ready, found, skippedKnown });
           const now = Date.now();
           if (now - lastProgressLogAt < 2000) {
             await patchRunState({ discovery: { ...pipeline }, upcoming: snapshotUpcoming(queue) });
@@ -1551,6 +1625,12 @@ async function startRun() {
       for (const slug of extra.prioritySlugs || sourceEvents.map((event) => event.slug)) {
         if (slug && !prioritySlugs.includes(slug)) prioritySlugs.push(slug);
       }
+      // Cards the feed already marks Going / Pending never need a lookup.
+      verifier.markSkipped(
+        Object.keys(extra.skipUrls || {})
+          .filter((key) => key.startsWith("slug:"))
+          .map((key) => key.slice(5))
+      );
       verifier.push(sourceEvents);
     };
     const runSource = async (sourceInfo, work) => {

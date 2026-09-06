@@ -497,6 +497,7 @@ export function compareEligibleEvents(a, b) {
 export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(), hooks = {} } = {}) {
   const buckets = new Map();
   const seen = new Set();
+  const skipped = new Set();
   const hydrated = [];
   const lookupCounts = { event: 0, not_event: 0, ineligible: 0, unavailable: 0 };
   const state = {
@@ -508,7 +509,12 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
     cacheHits: 0,
     rateLimitRetries: 0,
     rateLimitStopped: false,
+    skippedKnown: 0,
   };
+  // Events already handled (history) or already marked Going / Pending on a feed card are
+  // known before any request is made; they are dropped here instead of costing a lookup.
+  const isKnownSkip = (slug) =>
+    skipped.has(slug) || excludeIds.has(slug) || excludeIds.has(`slug:${slug}`);
   const verifiedTarget = maxResults + Math.max(8, Math.ceil(maxResults / 3));
   let takeIndex = 0;
   let cursor = 0;
@@ -530,10 +536,18 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
       }
     });
 
+  function markSkipped(slugs = []) {
+    for (const slug of slugs) if (slug) skipped.add(String(slug).replace(/^slug:/, ""));
+  }
+
   function push(records = []) {
     for (const record of normalizeScrapedEventLinks(records)) {
       if (seen.has(record.slug)) continue;
       seen.add(record.slug);
+      if (isKnownSkip(record.slug)) {
+        state.skippedKnown++;
+        continue;
+      }
       const key = record.source || "scraped";
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key).push(record);
@@ -547,9 +561,16 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
     for (let i = 0; i < keys.length; i++) {
       const key = keys[(cursor + i) % keys.length];
       const bucket = buckets.get(key);
-      if (!bucket.length) continue;
-      cursor = (cursor + i + 1) % keys.length;
-      return { ...bucket.shift(), sourceOrder: takeIndex++ };
+      while (bucket.length) {
+        const record = bucket.shift();
+        // A skip may have been marked after this link was pushed.
+        if (isKnownSkip(record.slug)) {
+          state.skippedKnown++;
+          continue;
+        }
+        cursor = (cursor + i + 1) % keys.length;
+        return { ...record, sourceOrder: takeIndex++ };
+      }
     }
     return null;
   }
@@ -621,6 +642,7 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
             cacheHit: Boolean(cached),
             slug: record.slug,
             finished: state.finished,
+            skippedKnown: state.skippedKnown,
           });
         } catch {
           /* progress reporting is best-effort */
@@ -654,6 +676,7 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
         lookupFailed: lookupCounts.unavailable,
         rateLimitRetries: state.rateLimitRetries,
         rateLimitStopped: state.rateLimitStopped,
+        skippedKnown: state.skippedKnown,
         pageCheckRequired: 0,
         freeRegisterable: registerable.length,
         newRegisterable: eligible.length,
@@ -663,7 +686,7 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
     };
   })();
 
-  return { push, finish, stop, done, state };
+  return { push, markSkipped, finish, stop, done, state };
 }
 
 /**

@@ -5,7 +5,11 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { discoverScrapedEventsWithStats, compareEligibleEvents } from "../lib/discovery.js";
+import {
+  discoverScrapedEventsWithStats,
+  createStreamingVerifier,
+  compareEligibleEvents,
+} from "../lib/discovery.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -140,8 +144,31 @@ const result = await discoverScrapedEventsWithStats(records, 10, new Set(), {
   onEvent: (e) => seen.push(e.slug),
   onProgress: async (p) => progress.push(p),
 });
-globalThis.fetch = realFetch;
 assert("onEvent receives only registerable events", seen.length === 2 && !seen.includes("b-paid-gala"));
+
+// Known skips never cost a lookup
+let lookups = 0;
+const countingFetch = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  lookups++;
+  return countingFetch(url);
+};
+const skipResult = await discoverScrapedEventsWithStats(
+  [...records, { url: "https://luma.com/d-done-before", source: "test" }],
+  10,
+  new Set(["slug:d-done-before"])
+);
+assert("history-excluded slug is not looked up", lookups === 3 && skipResult.stats.skippedKnown === 1);
+
+lookups = 0;
+const streaming = createStreamingVerifier({ maxResults: 10 });
+streaming.push([{ url: "https://luma.com/e-going", source: "sf" }, { url: "https://luma.com/f-new", source: "sf" }]);
+streaming.markSkipped(["slug:e-going"]);
+streaming.finish();
+const streamed = await streaming.done;
+assert("feed-marked slug pushed before the skip is still dropped", lookups === 1 && streamed.stats.skippedKnown === 1);
+assert("the remaining link is verified", streamed.events.length === 1 && streamed.events[0].slug === "f-new");
+globalThis.fetch = realFetch;
 assert("onEvent order matches the returned list", JSON.stringify(seen) === JSON.stringify(result.events.map((e) => e.slug)));
 assert("onProgress fires once per lookup", progress.length === 3 && progress[2].verified === 3 && progress[2].total === 3);
 assert("onProgress reports ready count", progress[2].ready === 2);

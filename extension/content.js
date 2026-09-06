@@ -1477,6 +1477,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === "REGISTER") {
     resetAbortFlag();
+    if (typeof setCursorMotion === "function") setCursorMotion(!message.fastMode);
     registerOnPage(message.profile, Boolean(message.keepCursor), message.event || {})
       .then((result) => sendResponse(result))
       .catch((err) =>

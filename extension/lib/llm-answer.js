@@ -110,7 +110,26 @@ async function callOllama(prompt, profile, eventTitle, fieldType, config) {
   return trimAnswer(data.message?.content, fieldType);
 }
 
+/**
+ * The offscreen model runs one generation at a time on a single WASM pipeline. Callers may now
+ * ask several questions at once (the form agent fires them in parallel), so local requests are
+ * queued here while cloud providers run genuinely concurrently.
+ */
+let localLane = Promise.resolve();
+function onLocalLane(fn) {
+  const run = localLane.then(fn, fn);
+  localLane = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 async function callLocalModel(question, profile, eventTitle, fieldType, qType) {
+  return onLocalLane(() => callLocalModelNow(question, profile, eventTitle, fieldType, qType));
+}
+
+async function callLocalModelNow(question, profile, eventTitle, fieldType, qType) {
   const result = await askLocalModel({
     question,
     profile,
@@ -123,6 +142,10 @@ async function callLocalModel(question, profile, eventTitle, fieldType, qType) {
 }
 
 async function callLocalOption(question, options, profile, eventTitle) {
+  return onLocalLane(() => callLocalOptionNow(question, options, profile, eventTitle));
+}
+
+async function callLocalOptionNow(question, options, profile, eventTitle) {
   const result = await askLocalModel({
     question,
     options,
