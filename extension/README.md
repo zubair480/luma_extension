@@ -139,6 +139,33 @@ Search boxes and read-only triggers inside custom dropdowns are never treated as
 every value is shape-checked against the control before it is written (a phone number cannot land
 in an email or free-text field). `npm run test:fields` covers these cases.
 
+### Luma's form, as measured
+
+These facts were established against live Luma registration forms (see the `probe:*` scripts,
+which open a real form anonymously, run the fill pipeline, and never submit) and the code depends
+on them:
+
+- The form is not a `role="dialog"`. It is a `<form class="registration-form-container">` inside a
+  glass overlay, and `<body>` gains a `…modal-open` class. The container lookup never returns
+  the page root; matching `[class*="modal"]` on the body was the root cause of dropdown option
+  discovery scanning the whole form and mistaking other questions' labels for options.
+- Labels contain zero-width spaces (`Email​`); `cleanLabel` strips them so texts compare.
+- A single-select is `<input role="combobox" aria-haspopup="listbox" aria-controls="…">` whose
+  `value` becomes the chosen option. A multi-select is a `<div role="combobox">` whose text gains
+  the chosen options. Both name their listbox with `aria-controls`; that listbox is the only
+  source of options.
+- The closed listbox stays mounted and interactable. Whether a list is open is read from the
+  combobox's `aria-expanded`, never from the listbox's presence.
+- Options select on pointer events or a plain click. A synthetic `mousedown` cancels the
+  selection, so the click helper sends none.
+- Calling `.focus()` on the combobox input from script dismisses the entire overlay. Nothing in
+  the fill pipeline focuses a control programmatically.
+- Escape closes an open list when sent to the combobox (or listbox); sent to `document` it
+  reaches the overlay's own handler and closes the form instead.
+- A question about other people ("who else should we invite… share their email") is free text,
+  never the user's own email; a `type=url` field takes its kind (LinkedIn / GitHub / X / website)
+  from its label.
+
 ## Use
 
 1. **Sign in to [lu.ma](https://lu.ma)** in Chrome (if not already)

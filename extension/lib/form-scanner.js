@@ -143,10 +143,12 @@ function scanRegistrationFields(doc = document) {
     if (!spec.el || seen.has(spec.el)) return;
     seen.add(spec.el);
     ensureFieldId(spec.el);
+    const label = spec.label || extractFieldLabel(spec.el, doc);
     fields.push({
       ...spec,
       fid: spec.el.getAttribute("data-luma-fid"),
-      label: spec.label || extractFieldLabel(spec.el, doc),
+      label,
+      attrType: spec.kind === "text" || spec.kind === "textarea" ? classifyByInputAttributes(spec.el, label) : null,
       filled: fieldHasValue(spec.el, spec.kind),
     });
   };
@@ -176,7 +178,6 @@ function scanRegistrationFields(doc = document) {
     pushField({
       el,
       kind: el.tagName === "TEXTAREA" ? "textarea" : "text",
-      attrType: classifyByInputAttributes(el),
     });
   }
 

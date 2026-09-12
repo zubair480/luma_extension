@@ -37,7 +37,7 @@ function loadFormIntelligence() {
     "document",
     "window",
     src +
-      "\nreturn { classifyQuestion, answerForQuestion, classifyByInputAttributes, isCustomSelectInput, valueFitsInput, labelSimilarity };"
+      "\nreturn { classifyQuestion, answerForQuestion, classifyByInputAttributes, isCustomSelectInput, valueFitsInput, labelSimilarity, cleanLabel, isAboutOthers };"
   );
   return fn(sandbox.document, sandbox.window);
 }
@@ -81,12 +81,26 @@ assert("'Which city are you based in?' is a location", fi.classifyQuestion("Whic
 assert("'Anywhere else you want to go?' is not motivation", fi.classifyQuestion("Anywhere else you want to go?") !== "motivation");
 assert("'Why do you want to attend?' is motivation", fi.classifyQuestion("Why do you want to attend?") === "motivation");
 
+console.log("\nQuestions about other people (live Luma forms)");
+assert("'Who else should we invite? Share the email / LinkedIn' is free text", fi.classifyQuestion("Who else in your network should we invite? Please share the email / LinkedIn with us.") === "custom");
+assert("'Are you with a team? List their names/Luma emails' is free text", fi.classifyQuestion("Are you with a team? If so, please list their names/Luma emails") === "custom");
+assert("'What's your work email?' is still an email field", fi.classifyQuestion("What’s your work email?") === "work_email");
+assert("'What is your LinkedIn profile?' is still linkedin", fi.classifyQuestion("What is your LinkedIn profile?") === "linkedin");
+assert("isAboutOthers flags 'their'", fi.isAboutOthers("please list their names"));
+assert("isAboutOthers does not flag a plain question", !fi.isAboutOthers("What is your GitHub?"));
+
+console.log("\nLabel cleaning");
+assert("zero-width spaces are stripped", fi.cleanLabel("Email​ *") === "Email");
+assert("word joiner and BOM are stripped", fi.cleanLabel("﻿Name⁠") === "Name");
+
 console.log("\nAttribute classification");
 assert("type=tel → phone", fi.classifyByInputAttributes(el({ type: "tel" })) === "phone");
 assert("autocomplete=email → email", fi.classifyByInputAttributes(el({ type: "text", autocomplete: "email" })) === "email");
 assert("autocomplete=given-name → first_name", fi.classifyByInputAttributes(el({ autocomplete: "given-name" })) === "first_name");
 assert("autocomplete=organization → company", fi.classifyByInputAttributes(el({ autocomplete: "organization" })) === "company");
 assert("type=url with linkedin name → linkedin", fi.classifyByInputAttributes(el({ type: "url", name: "linkedin_url" })) === "linkedin");
+assert("type=url labelled GitHub → github, not website", fi.classifyByInputAttributes(el({ type: "url", name: "registration_answers.1.value" }), "What's your GitHub?") === "github");
+assert("type=url labelled 'link to a project' → website", fi.classifyByInputAttributes(el({ type: "url" }), "Please link to a project you've built") === "website");
 assert("plain text input → null", fi.classifyByInputAttributes(el({ type: "text" })) === null);
 
 console.log("\nCustom select inputs are not text fields");

@@ -135,6 +135,7 @@ function setCursorMotion(on) {
 function setCursorPosition(x, y) {
   cursorX = x;
   cursorY = y;
+  if (!cursorPointer || !cursorRing) return;
   const px = `${Math.round(x)}px`;
   const py = `${Math.round(y)}px`;
   cursorPointer.style.setProperty("--lx", px);

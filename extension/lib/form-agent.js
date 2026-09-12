@@ -81,18 +81,40 @@ async function clickOptionByText(text, activator, label, log) {
   return true;
 }
 
+/**
+ * Close an open list without disturbing the form. A single-select closes itself on pick; a
+ * multi-select stays open. Escape must be sent to the combobox itself: Luma's overlay also
+ * listens for Escape at the document level, and an Escape that reaches it dismisses the whole
+ * registration form (verified live). If the list still shows as open, toggle it with a click.
+ */
 async function closeDropdown(activator, log) {
-  const confirm = findClickable(["done", "apply", "confirm", "ok"]);
+  const combo =
+    (typeof ariaCombobox === "function" && ariaCombobox(activator)) || activator;
+  const listbox = typeof controlledListbox === "function" ? controlledListbox(combo, document) : null;
+  const listOpen = () => {
+    const open = typeof ariaComboboxOpen === "function" ? ariaComboboxOpen(combo, document) : null;
+    if (open != null) return open;
+    return isDropdownOverlayOpen();
+  };
+
+  if (!listOpen()) return;
+
+  const confirm = listbox ? findClickable(["done", "apply", "confirm", "ok"], { root: listbox }) : null;
   if (confirm) {
     await agentClick(confirm, "Confirm selection…", log, "fill", { quick: true });
     await runAwareSleep(200);
-    return;
+    if (!listOpen()) return;
   }
-  if (isDropdownOverlayOpen()) {
-    activator.focus?.();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    await runAwareSleep(150);
+
+  for (const type of ["keydown", "keyup"]) {
+    combo.dispatchEvent(new KeyboardEvent(type, { key: "Escape", code: "Escape", keyCode: 27, bubbles: true }));
   }
+  await runAwareSleep(150);
+  if (!listOpen()) return;
+
+  simulatePointerClick(combo);
+  await runAwareSleep(200);
+  if (listOpen()) log("fill", "Dropdown still open after Escape and toggle — leaving it", "warn");
 }
 
 async function fillMultiSelectSequential(activator, label, profile, log) {
@@ -141,9 +163,10 @@ async function openDropdownRobust(activator, log) {
   const input = findComboboxInput(activator);
   const clickTargets = [...new Set([input, activator, activator.parentElement, activator.closest("button")].filter(Boolean))];
 
+  // No programmatic .focus() anywhere in here: focusing Luma's combobox input from script
+  // dismisses the entire registration overlay (verified live). Pointer clicks open it reliably.
   for (const target of clickTargets) {
     target.scrollIntoView({ block: "nearest" });
-    target.focus?.();
     await runAwareSleep(80);
     simulatePointerClick(target);
     await runAwareSleep(350);
@@ -153,7 +176,6 @@ async function openDropdownRobust(activator, log) {
   }
 
   const focusEl = input || activator;
-  focusEl.focus?.();
   for (const key of ["ArrowDown", " "]) {
     focusEl.dispatchEvent(
       new KeyboardEvent("keydown", { key, bubbles: true, code: key, keyCode: key === " " ? 32 : 40 })
@@ -191,7 +213,6 @@ async function fillNativeSelectMulti(select, label, profile, log) {
 async function fillMultiSelectKeyboard(activator, label, profile, multi, log) {
   const input = findComboboxInput(activator) || activator;
   await ensureDropdownOpen(activator, label, log);
-  input.focus?.();
   await runAwareSleep(150);
 
   const prefs = profileCategoryPrefs(profile);
@@ -221,7 +242,7 @@ async function fillMultiSelectKeyboard(activator, label, profile, multi, log) {
     }
 
     const text = cleanLabel(activeEl.getAttribute("aria-label") || activeEl.textContent);
-    if (!isLikelySelectOptionText(text, label)) continue;
+    if (!isLikelySelectOptionText(text, label, document)) continue;
 
     for (const pref of prefs) {
       if (!text.toLowerCase().includes(pref) || pickedTexts.has(text.toLowerCase())) continue;
@@ -248,7 +269,7 @@ async function fillMultiSelectKeyboard(activator, label, profile, multi, log) {
 function needsModelAnswer(field, profile) {
   if (field.kind !== "text" && field.kind !== "textarea") return false;
   if (field.filled || fieldHasValue(field.el, field.kind)) return false;
-  if (field.attrType || classifyByInputAttributes(field.el)) return false;
+  if (field.attrType || classifyByInputAttributes(field.el, field.label)) return false;
   if (answerForQuestion(field.label, profile)) return false;
   const qType = classifyQuestion(field.label);
   return needsSmartAnswer(qType, field.label) || qType === "custom";
@@ -281,12 +302,17 @@ function queueSmartAnswers(fields, jobs, profile, eventTitle, log) {
 
 async function fillTextFieldAgent(field, profile, eventTitle, log) {
   const label = field.label;
-  const attrType = field.attrType || classifyByInputAttributes(field.el);
-  const labelType = classifyQuestion(label);
+  const attrType = field.attrType || classifyByInputAttributes(field.el, label);
+  let labelType = classifyQuestion(label);
+  // A long free-text prompt that merely mentions a link or an email ("share the repo and your
+  // email…") wants prose, not the bare profile value.
+  if (!attrType && field.kind === "textarea" && IDENTITY_TYPES.has(labelType) && label.length > 40) {
+    labelType = "custom";
+  }
   // The control's own attributes beat the label text: an input[type=tel] is a phone field no
   // matter what the nearby copy says, and a plain textarea never receives a phone number.
   const qType = attrType || labelType;
-  let value = answerForQuestion(label, profile, attrType);
+  let value = attrType || labelType !== "custom" ? answerForQuestion(label, profile, attrType || labelType) : null;
 
   if (!value && !attrType && field.answerPromise) {
     setAgentStatus(`Waiting for AI: ${trimStatus(label, 40)}`);

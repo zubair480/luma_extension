@@ -276,9 +276,30 @@ function detectUserRsvpBadge(doc = document) {
   return null;
 }
 
+/** Identity types that must not be written into a question about someone else. */
+const IDENTITY_TYPES = new Set([
+  "email", "work_email", "phone", "linkedin", "github", "twitter", "website",
+  "full_name", "first_name", "last_name",
+]);
+
+/** "Who else should we invite? Share their email" is a free-text question, not an email field. */
+function isAboutOthers(label) {
+  return /\b(their|who else|invite|teammates?|team members?|list (the )?(names?|emails?)|names? (and|or|\/) (emails?|luma)|refer (a )?friend|plus.?one|guest'?s?)\b/i.test(
+    label || ""
+  );
+}
+
 function classifyQuestion(label) {
   const l = (label || "").toLowerCase().replace(/\*/g, "").trim();
   if (!l) return "unknown";
+  if (isAboutOthers(l)) {
+    const type = classifyQuestionRaw(l);
+    return IDENTITY_TYPES.has(type) ? "custom" : type;
+  }
+  return classifyQuestionRaw(l);
+}
+
+function classifyQuestionRaw(l) {
 
   if (/how did you hear|how did you find|where did you hear|referral|discover this|hear about the event|hear about this event/.test(l)) {
     return "referral";
@@ -366,7 +387,7 @@ function classifyQuestion(label) {
  * These come from the form author and are far more reliable than nearby label text, so they
  * take precedence over label classification when present.
  */
-function classifyByInputAttributes(el) {
+function classifyByInputAttributes(el, label = "") {
   if (!el || typeof el.getAttribute !== "function") return null;
   const type = (el.getAttribute("type") || "").toLowerCase();
   const auto = (el.getAttribute("autocomplete") || "").toLowerCase();
@@ -385,6 +406,9 @@ function classifyByInputAttributes(el) {
     if (/linkedin/.test(nameId)) return "linkedin";
     if (/github/.test(nameId)) return "github";
     if (/twitter|x_handle|xhandle/.test(nameId)) return "twitter";
+    // A URL field asks for *some* link; the label says which one.
+    const byLabel = classifyQuestion(label);
+    if (["linkedin", "github", "twitter", "website"].includes(byLabel)) return byLabel;
     return "website";
   }
   if (/\bphone\b|\bmobile\b|\btelephone\b/.test(nameId)) return "phone";
@@ -716,6 +740,15 @@ function looksLikeDropdownTrigger(el, doc = document) {
   if (isEventBodyCopy(singleLine) || isEventBodyCopy(questionLabel)) return false;
 
   if (role === "combobox" || hasPopup === "listbox" || hasPopup === "menu") {
+    // Luma's single-select is an <input role=combobox> whose value becomes the chosen option;
+    // its multi-select is a div whose text gains the chosen options. Either way, a control that
+    // already holds a choice is filled and must not be reported as a pending dropdown.
+    if (tag === "INPUT" || tag === "TEXTAREA") {
+      const value = (el.value || "").trim();
+      if (value && !isDropdownTriggerText(value) && !isPlaceholderOption(value)) return false;
+      return isFormQuestionLabel(questionLabel) || isDropdownTriggerText(el.getAttribute("placeholder") || "", { allowEmpty: true });
+    }
+    if (multiSelectHasSelection(el, doc)) return false;
     return elementShowsPlaceholder(el) || isFormQuestionLabel(questionLabel);
   }
 
@@ -749,8 +782,8 @@ const MAX_DROPDOWN_TRIGGERS = 8;
 
 /** Shared trigger finder — registration modal only (not event page body). */
 function findCustomDropdownTriggers(doc = document) {
-  const root = getRegistrationModalRoot(doc);
-  if (!root) return [];
+  const root = getRegistrationModalRoot(doc) || getFormRoot(doc);
+  if (!root || isPageRoot(root, doc)) return [];
 
   const candidates = [];
   for (const el of root.querySelectorAll(
@@ -963,9 +996,26 @@ function resolveDropdownActivator(trigger) {
   );
 }
 
-function isLikelySelectOptionText(text, questionLabel = "") {
+/** Texts of every field label in the registration container; options can never be one of them. */
+function formLabelTexts(doc = document) {
+  const root = getFormRoot(doc);
+  const texts = new Set();
+  if (!root) return texts;
+  for (const label of root.querySelectorAll("label")) {
+    const t = cleanLabel(label.textContent).toLowerCase();
+    if (t) texts.add(t);
+  }
+  for (const control of root.querySelectorAll(FORM_CONTROL_SEL)) {
+    const t = cleanLabel(getQuestionTextForElement(control, doc)).toLowerCase();
+    if (t) texts.add(t);
+  }
+  return texts;
+}
+
+function isLikelySelectOptionText(text, questionLabel = "", doc = null) {
   const t = cleanLabel(text);
   if (!t || t.length < 2 || t.length > 80) return false;
+  if (doc && formLabelTexts(doc).has(t.toLowerCase())) return false;
   if (isPlaceholderOption(t)) return false;
   if (/^(select|choose|pick)\b/i.test(t)) return false;
   if (isEventBodyCopy(t)) return false;
@@ -1008,10 +1058,15 @@ function findNativeSelectForTrigger(trigger, doc = document) {
 
 function simulatePointerClick(el) {
   if (!el) return;
-  const opts = { bubbles: true, cancelable: true, view: window, pointerId: 1, pointerType: "mouse" };
-  el.dispatchEvent(new PointerEvent("pointerdown", opts));
-  el.dispatchEvent(new PointerEvent("pointerup", opts));
-  el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  const rect = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
+  const pos = rect ? { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 } : {};
+  const base = { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1, ...pos };
+  const pointer = { ...base, pointerId: 1, pointerType: "mouse", isPrimary: true };
+  // Pointer events plus click, with real coordinates. Deliberately no mousedown/mouseup: Luma's
+  // menus treat a synthetic mousedown as an outside press and drop the selection (verified live).
+  el.dispatchEvent(new PointerEvent("pointerdown", pointer));
+  el.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 }));
+  el.dispatchEvent(new MouseEvent("click", { ...base, buttons: 0 }));
   if (typeof el.click === "function") el.click();
 }
 
@@ -1057,7 +1112,7 @@ function collectFloatingListOptions(trigger, doc = document, questionLabel = "")
       const labelEl = el.closest("label") || (el.id && doc.querySelector(`label[for="${safeCssEscape(el.id)}"]`));
       text = cleanLabel(labelEl?.textContent || text);
     }
-    if (!isLikelySelectOptionText(text, questionLabel)) continue;
+    if (!isLikelySelectOptionText(text, questionLabel, doc)) continue;
 
     const key = text.toLowerCase();
     if (seen.has(key)) continue;
@@ -1080,7 +1135,7 @@ function collectOptionsFromSnapshotDiff(beforeSet, doc, trigger, questionLabel =
     if (!el || trigger?.contains(el)) continue;
     const text = cleanLabel(el.getAttribute("aria-label") || el.textContent);
     if (!text || beforeSet.has(text.toLowerCase())) continue;
-    if (!isLikelySelectOptionText(text, questionLabel)) continue;
+    if (!isLikelySelectOptionText(text, questionLabel, doc)) continue;
     if (el.children.length > 6) continue;
 
     const key = text.toLowerCase();
@@ -1122,20 +1177,58 @@ function resolveOptionElement(text, activator, label, doc = document) {
   return el;
 }
 
+function ariaCombobox(activator) {
+  if (!activator) return null;
+  return activator.matches?.('[role="combobox"], [aria-haspopup], [aria-expanded]')
+    ? activator
+    : activator.closest?.('[role="combobox"], [aria-haspopup], [aria-expanded]') || null;
+}
+
+/**
+ * Whether an ARIA combobox is open. Luma keeps a closed listbox mounted (and technically
+ * interactable), so the control's own aria-expanded is the only reliable signal; the listbox's
+ * presence is used only for widgets that do not maintain that attribute.
+ */
+function ariaComboboxOpen(combo, doc = document) {
+  if (!combo) return null;
+  if (combo.hasAttribute("aria-expanded")) return combo.getAttribute("aria-expanded") === "true";
+  const listbox = controlledListbox(combo, doc);
+  if (listbox) {
+    return isElementInteractable(listbox) && Boolean(listbox.querySelector("[role='option'], [role='menuitem'], [role='menuitemcheckbox']"));
+  }
+  return null;
+}
+
 function dropdownHasVisibleOptions(activator, label, doc = document) {
+  const combo = ariaCombobox(activator);
+  if (combo) {
+    const open = ariaComboboxOpen(combo, doc);
+    if (open != null) return open;
+  }
   if (isDropdownOverlayOpen(doc)) return true;
   return collectFloatingListOptions(activator, doc, label).length > 1;
 }
 
+/** The combobox that controls a given list panel, if any names it. */
+function controllerOfPanel(panel, doc = document) {
+  if (!panel?.id) return null;
+  return doc.querySelector(`[aria-controls="${safeCssEscape(panel.id)}"], [aria-owns="${safeCssEscape(panel.id)}"]`);
+}
+
 function multiSelectHasSelection(activator, doc = document) {
-  const container = getQuestionFieldContainer(activator, doc);
-  const text = (activator.textContent || activator.value || "").trim();
+  const scope = activator.closest?.('[role="combobox"], [aria-haspopup]') || activator;
+  const text = (scope.textContent || scope.value || "").trim();
   if (text && !isDropdownTriggerText(text) && !isPlaceholderOption(text)) return true;
 
-  if (!container) return false;
-  if (container.querySelector('[aria-selected="true"], [data-state="checked"], input[type="checkbox"]:checked')) {
+  // Only the control's own listbox counts; a checked consent box elsewhere in the form does not.
+  const listbox = controlledListbox(scope, doc);
+  if (listbox && listbox.querySelector('[aria-selected="true"], [data-state="checked"], [aria-checked="true"]')) {
     return true;
   }
+  if (scope.querySelector('[aria-selected="true"], [data-state="checked"], input[type="checkbox"]:checked')) {
+    return true;
+  }
+  const container = scope;
   for (const el of container.querySelectorAll("span, div")) {
     const t = (el.textContent || "").trim();
     if (t.length > 2 && t.length < 40 && !isPlaceholderOption(t) && !isDropdownTriggerText(t)) {
@@ -1151,7 +1244,13 @@ function isDropdownOverlayOpen(doc = document) {
   for (const panel of doc.querySelectorAll(
     '[role="listbox"], [role="menu"], [data-radix-popper-content-wrapper], [data-radix-select-content], [class*="popover" i]'
   )) {
-    if (isElementInteractable(panel)) return true;
+    if (!isElementInteractable(panel)) continue;
+    // A mounted-but-collapsed list (its combobox says aria-expanded="false") is not open.
+    const controller = controllerOfPanel(panel, doc);
+    if (controller && controller.getAttribute("aria-expanded") === "false") continue;
+    if (panel.querySelector("[role='option'], [role='menuitem'], [role='menuitemcheckbox'], [data-radix-collection-item], input[type='checkbox']")) {
+      return true;
+    }
   }
 
   const modal = getRegistrationModalRoot(doc);
@@ -1272,7 +1371,11 @@ function getFieldLabel(el, doc = document) {
 }
 
 function cleanLabel(text) {
-  return (text || "").replace(/\s+/g, " ").replace(/\*+/g, "").trim();
+  return (text || "")
+    .replace(/[\u200B-\u200D\uFEFF\u2060]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\*+/g, "")
+    .trim();
 }
 
 function getQuestionTextForElement(el, doc = document) {
@@ -1299,8 +1402,24 @@ function getQuestionTextForElement(el, doc = document) {
   return getFieldLabel(el, doc);
 }
 
+const FORM_CONTROL_SEL = "input:not([type='hidden']), textarea, select, [role='combobox']";
+
+function isPageRoot(el, doc = document) {
+  return !el || el === doc.documentElement || el === doc.body;
+}
+
+function hasVisibleFormControl(el) {
+  return [...el.querySelectorAll(FORM_CONTROL_SEL)].some(isVisible);
+}
+
+/**
+ * The registration container. Luma renders its form inside a glass overlay (no role="dialog")
+ * and marks <body> with a "…modal-open" class, so a naive [class*="modal"] match returns the
+ * whole page and every form-scoped lookup then spans the event page as well. The page root is
+ * never returned: with no overlay the <form> itself is the container, otherwise null.
+ */
 function getRegistrationModalRoot(doc = document) {
-  const dialogs = [...doc.querySelectorAll('[role="dialog"]')].filter(isVisible);
+  const dialogs = [...doc.querySelectorAll('[role="dialog"]')].filter((d) => isVisible(d) && !isPageRoot(d, doc));
   if (dialogs.length) {
     const withForm = dialogs.find(
       (d) =>
@@ -1310,12 +1429,33 @@ function getRegistrationModalRoot(doc = document) {
     return withForm || dialogs[dialogs.length - 1];
   }
 
-  const modals = [...doc.querySelectorAll('[class*="modal" i]')].filter(isVisible);
-  if (modals.length) {
-    return modals.find((m) => m.querySelector("input, textarea, [role='combobox']")) || modals[modals.length - 1];
+  const overlaySelectors = [
+    '[class*="registration-overlay" i]',
+    ".lux-glass-overlay-content-container",
+    '[class*="glass-overlay" i]',
+    '[class*="lux-overlay" i]',
+    '[class*="drawer" i]',
+    '[class*="modal" i]',
+  ];
+  for (const selector of overlaySelectors) {
+    const candidates = [...doc.querySelectorAll(selector)].filter(
+      (el) => !isPageRoot(el, doc) && hasVisibleFormControl(el)
+    );
+    if (!candidates.length) continue;
+    // Prefer the innermost candidate that still holds the controls.
+    const innermost = candidates.find((el) => !candidates.some((other) => other !== el && el.contains(other)));
+    const chosen = innermost || candidates[candidates.length - 1];
+    const form = chosen.querySelector("form");
+    return form && hasVisibleFormControl(form) ? form : chosen;
   }
 
-  return null;
+  const forms = [...doc.querySelectorAll("form")].filter(
+    (f) =>
+      hasVisibleFormControl(f) &&
+      (f.querySelector("input[name='name'], input[name='email'], [name^='registration_answers']") ||
+        /your info|request to join|registration/i.test(f.textContent || ""))
+  );
+  return forms[0] || null;
 }
 
 /** Event-page registration sidebar / ticket panel (before modal opens). Always returns a node. */
@@ -1620,7 +1760,7 @@ function collectFieldScopedOptions(trigger, doc = document) {
         (el.id && doc.querySelector(`label[for="${safeCssEscape(el.id)}"]`)) || el.closest("label");
       text = cleanLabel(labelEl?.textContent || text);
     }
-    if (!isLikelySelectOptionText(text, questionLabel)) return;
+    if (!isLikelySelectOptionText(text, questionLabel, doc)) return;
 
     const key = text.toLowerCase();
     if (seen.has(key)) return;
@@ -1643,12 +1783,8 @@ function collectFieldScopedOptions(trigger, doc = document) {
     addOption(el);
   }
 
-  for (const el of container.querySelectorAll("label, li, button, div[tabindex='0'], div[tabindex='-1']")) {
-    if (el.querySelector("input[type='checkbox'], input[type='radio']")) continue;
-    if (el.children.length > 4) continue;
-    addOption(el);
-  }
-
+  // Generic labels / buttons inside the container are not options: on a form whose container
+  // is larger than one question they are the other questions' labels.
   return options;
 }
 
@@ -1670,6 +1806,19 @@ function describeDropdownDiscovery(trigger, doc = document) {
   return `panels=${panels.length}, field=${fieldOpts.length}, float=${floating.length}, modalOpts=${modalOpts}, portaled=${portaled}, listboxes=${listboxes}, expanded=${expanded || "?"}${sample ? `, sample=[${sample}]` : ""}`;
 }
 
+/** The listbox / menu element a combobox trigger points at, if it names one and it is rendered. */
+function controlledListbox(trigger, doc = document) {
+  if (!trigger) return null;
+  const owner = trigger.matches?.("[aria-controls], [aria-owns]")
+    ? trigger
+    : trigger.closest?.("[aria-controls], [aria-owns]") || trigger.querySelector?.("[aria-controls], [aria-owns]");
+  if (!owner) return null;
+  const id = owner.getAttribute("aria-controls") || owner.getAttribute("aria-owns");
+  if (!id) return null;
+  const el = doc.getElementById(id);
+  return el || null;
+}
+
 function collectDropdownOptions(trigger = null, doc = document, beforeSnapshot = null) {
   const options = [];
   const seen = new Set();
@@ -1687,7 +1836,7 @@ function collectDropdownOptions(trigger = null, doc = document, beforeSnapshot =
       text = (text || "").trim().split("\n")[0].trim();
     }
 
-    if (!isLikelySelectOptionText(text, questionLabel)) return;
+    if (!isLikelySelectOptionText(text, questionLabel, doc)) return;
     const key = `${text.toLowerCase()}::${el.tagName}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -1701,6 +1850,28 @@ function collectDropdownOptions(trigger = null, doc = document, beforeSnapshot =
 
   const optionSelectors =
     "[role='option'], [role='menuitem'], [role='menuitemcheckbox'], [role='radio'], [role='checkbox'], [data-radix-collection-item], [aria-checked], [cmdk-item], [data-value]";
+
+  // A combobox that names its listbox (aria-controls / aria-owns) is authoritative: those are
+  // the real options, and nothing else on the page should be considered while that link exists.
+  const controlled = controlledListbox(trigger, doc);
+  if (controlled) {
+    for (const el of controlled.querySelectorAll("[role='option'], [role='menuitemcheckbox'], [role='menuitem']")) {
+      addOption(el);
+    }
+    return options;
+  }
+
+  // A proper combobox whose listbox is not rendered is simply closed: report no options so the
+  // caller opens it, instead of harvesting nearby labels as if they were choices.
+  if (ariaCombobox(trigger)) {
+    for (const panel of doc.querySelectorAll("[role='listbox'], [role='menu'], [data-radix-popper-content-wrapper], [data-radix-select-content]")) {
+      if (!isElementInteractable(panel)) continue;
+      for (const el of panel.querySelectorAll("[role='option'], [role='menuitemcheckbox'], [role='menuitem'], [data-radix-collection-item]")) {
+        addOption(el);
+      }
+    }
+    return options;
+  }
 
   for (const panel of getActiveDropdownPanels(doc, trigger)) {
     for (const el of panel.querySelectorAll(optionSelectors)) {

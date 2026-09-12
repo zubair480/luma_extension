@@ -884,7 +884,7 @@ async function fillFieldsByLabelScan(profile, newAnswers) {
     const own = extractFieldLabel(input);
     if (own && own.length >= 3 && own !== text) continue;
 
-    const attrType = classifyByInputAttributes(input);
+    const attrType = classifyByInputAttributes(input, text);
     const fieldType = input.tagName === "TEXTAREA" ? "textarea" : "text";
     const { value, fromLlm } = attrType
       ? { value: answerForQuestion(text, profile, attrType), fromLlm: false }
@@ -913,7 +913,7 @@ async function fillForm(profile) {
     if (field.tagName !== "SELECT" && isCustomSelectInput(field)) continue;
 
     const label = extractFieldLabel(field);
-    const attrType = classifyByInputAttributes(field);
+    const attrType = classifyByInputAttributes(field, label);
     const qType = attrType || classifyQuestion(label);
 
     if (field.tagName === "SELECT") {
@@ -1369,6 +1369,11 @@ async function registerOnPage(profile, keepCursor = false, eventMeta = {}) {
       return paidMid;
     }
 
+    if (attempt > 0 && !isRegistrationFormOpen() && !detectExistingRegistration(true)) {
+      log("open_form", "Registration form closed during filling — reopening", "warn");
+      await clickPrimaryAction(mode, log);
+      await guardEventPage(expectedEventUrl, log, "open_form");
+    }
     log("fill", `Filling form (attempt ${attempt + 1}/5)…`);
     const ready = await prepareRegistrationForm(profile, savedAnswers, log, expectedEventUrl, eventMeta.title);
     if (!ready) {
