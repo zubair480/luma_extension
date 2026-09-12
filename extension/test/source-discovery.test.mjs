@@ -72,7 +72,7 @@ globalThis.fetch = async (url) => {
           api_id: `evt-${slug}`,
           url: slug,
           name: "Verified AI Event",
-          start_at: "2026-08-01T18:00:00.000Z",
+          start_at: new Date(Date.now() + 7 * 86400000).toISOString(),
           geo_address_info: {
             city: "San Francisco",
             region: "California",

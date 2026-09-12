@@ -1,4 +1,4 @@
-import { createStreamingVerifier, compareEligibleEvents } from "./lib/discovery.js";
+import { createStreamingVerifier, compareEligibleEvents, isPastEvent } from "./lib/discovery.js";
 import { discoverCerebralValleyViaApi } from "./lib/cv-api-discovery.js";
 import {
   discoverFoundersClubEvents,
@@ -1067,6 +1067,19 @@ async function processRun(
         continue;
       }
 
+      // Events can sit in the queue for a while; never open one that has ended meanwhile.
+      if (isPastEvent(event)) {
+        await recordSkip(event, {
+          event,
+          success: true,
+          skipped: true,
+          status: "skipped_past",
+          message: "Event already ended — skipped",
+          timestamp: new Date().toISOString(),
+        });
+        continue;
+      }
+
       try {
         await throwIfStoppedAsync();
         const eventUrl = eventPageUrl(event);
@@ -1638,7 +1651,8 @@ async function startRun() {
             `Verification complete — ${disc.stats.totalScraped} unique links · ${disc.stats.hydrated} verified events · ${disc.stats.newRegisterable} registerable` +
               (disc.stats.verifiedFromPage ? ` · ${disc.stats.verifiedFromPage} from page data` : "") +
               (disc.stats.cacheHits ? ` · ${disc.stats.cacheHits} from cache` : "") +
-              (disc.stats.skippedKnown ? ` · ${disc.stats.skippedKnown} already handled` : ""),
+              (disc.stats.skippedKnown ? ` · ${disc.stats.skippedKnown} already handled` : "") +
+              (disc.stats.rejectedPast ? ` · ${disc.stats.rejectedPast} past events dropped` : ""),
             "info",
             { stats: queue.stats }
           ),

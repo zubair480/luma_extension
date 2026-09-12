@@ -181,7 +181,25 @@ async function fetchLumaWithBackoff(url, options, { max429Retries = 1 } = {}) {
   }
 }
 
-function parseEvent(entry, query = "", source = "") {
+/**
+ * Only today's and upcoming events are wanted. An event is past once it has ended; one with no
+ * end time is past once its start date is before today (local time), so a multi-hour event that
+ * started this morning is still registerable this afternoon. Accepts both API records
+ * (start_at / end_at) and parsed events (startAt / endAt), including cached ones.
+ */
+export function isPastEvent(event = {}, now = Date.now()) {
+  const endRaw = event.end_at ?? event.endAt ?? null;
+  const startRaw = event.start_at ?? event.startAt ?? null;
+  const end = endRaw ? Date.parse(endRaw) : NaN;
+  if (Number.isFinite(end)) return end < now;
+  const start = startRaw ? Date.parse(startRaw) : NaN;
+  if (!Number.isFinite(start)) return false;
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  return start < startOfToday.getTime();
+}
+
+function parseEvent(entry, query = "", source = "", now = Date.now()) {
   const event = entry.event || {};
   const ticket = entry.ticket_info || {};
   const geo = event.geo_address_info || {};
@@ -189,6 +207,8 @@ function parseEvent(entry, query = "", source = "") {
 
   const slug = event.url;
   if (!slug || !event.start_at || !isValidEventSlug(slug)) return null;
+
+  if (isPastEvent(event, now)) return null;
 
   if (isVirtualEventFromApi(event, geo)) return null;
 
@@ -212,6 +232,7 @@ function parseEvent(entry, query = "", source = "") {
     url: `https://luma.com/${slug}`,
     altUrl: `https://lu.ma/${slug}`,
     startAt: event.start_at,
+    endAt: event.end_at || null,
     city: geo.city || geo.city_state || "San Francisco",
     location: locationLabel,
     address: geo.address || geo.full_address || "",
@@ -286,6 +307,7 @@ function scoreEvent(event) {
 }
 
 function isRegisterable(event) {
+  if (isPastEvent(event)) return false;
   if (["going", "pending", "waitlist"].includes(event.userRsvpStatus)) return false;
 
   const reg = event.registrationAvailability || "unknown";
@@ -526,6 +548,7 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
     rateLimitStopped: false,
     skippedKnown: 0,
     fromPage: 0,
+    rejectedPast: 0,
   };
   // Events already handled (history) or already marked Going / Pending on a feed card are
   // known before any request is made; they are dropped here instead of costing a lookup.
@@ -620,10 +643,14 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
       // Page data is live and free; the cache is next; the API request is the last resort.
       const fromEntry = record.entry ? lookupFromFeedEntry(record.entry, record.slug) : null;
       const cached = fromEntry ? null : readLookupCache(record.slug);
-      const lookup = fromEntry || cached || (await fetchEventLookupBySlug(record.slug));
+      let lookup = fromEntry || cached || (await fetchEventLookupBySlug(record.slug));
       if (fromEntry) state.fromPage++;
       else if (cached) state.cacheHits++;
       if (!cached) writeLookupCache(record.slug, lookup);
+      if (lookup.status === "event" && isPastEvent(lookup.event)) {
+        lookup = { status: "ineligible", kind: "past", rateLimitRetries: lookup.rateLimitRetries || 0 };
+        state.rejectedPast++;
+      }
 
       state.verified++;
       lookupCounts[lookup.status] = (lookupCounts[lookup.status] || 0) + 1;
@@ -698,6 +725,7 @@ export function createStreamingVerifier({ maxResults = 50, excludeIds = new Set(
         rateLimitStopped: state.rateLimitStopped,
         skippedKnown: state.skippedKnown,
         verifiedFromPage: state.fromPage,
+        rejectedPast: state.rejectedPast,
         pageCheckRequired: 0,
         freeRegisterable: registerable.length,
         newRegisterable: eligible.length,

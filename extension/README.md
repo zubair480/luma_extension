@@ -17,6 +17,11 @@ the public RSS feed, so the extension reads it with a single background fetch â€
 no login. The parsed result is cached against the post's `pubDate`, so repeat runs in the same week
 skip the download.
 
+Only today's and upcoming events are queued. An event is dropped once it has ended; an event with
+no end time is dropped once its start date is before today, so something that started this
+morning is still registerable this afternoon. The check runs on every path (API lookup, feed page
+data, cached verdicts) and once more right before a page is opened.
+
 Links from every source are canonicalized (`lu.ma` â†’ `luma.com`), deduped by slug, then verified
 one at a time against the Luma API. Verification is interleaved round-robin across sources and
 ranked on that interleaved position, so a source contributing 60 links cannot crowd out one

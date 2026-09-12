@@ -84,6 +84,7 @@ function statusLabel(result) {
   if (result.status === "skipped_paid") return "Paid — skipped";
   if (result.status === "skipped_women_only") return "Women-only — skipped";
   if (result.status === "skipped_virtual") return "Virtual — skipped";
+  if (result.status === "skipped_past") return "Already ended — skipped";
   if (result.status === "navigated_away") return "Left event page";
   if (result.success) return result.status === "registered" ? "Registered" : "Done";
   return result.message || result.status || "Failed";

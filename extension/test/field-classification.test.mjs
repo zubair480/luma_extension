@@ -9,6 +9,7 @@ import {
   discoverScrapedEventsWithStats,
   createStreamingVerifier,
   compareEligibleEvents,
+  isPastEvent,
 } from "../lib/discovery.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -198,6 +199,42 @@ assert("page entries cost no lookup; only the scraped link does", lookups === 1 
 assert("page entry is registerable straight from page data", pageResult.events.some((e) => e.slug === "g-page-event"));
 assert("paid page entry is rejected without a request", !pageResult.events.some((e) => e.slug === "h-page-paid"));
 assert("duplicate scraped link does not re-verify the page entry", pageResult.stats.totalScraped === 3);
+
+console.log("\nOnly today's and upcoming events");
+const H = 3600000;
+const todayNoon = new Date();
+todayNoon.setHours(12, 0, 0, 0);
+const now = todayNoon.getTime();
+assert("ended yesterday is past", isPastEvent({ start_at: new Date(now - 30 * H).toISOString(), end_at: new Date(now - 26 * H).toISOString() }, now));
+assert("ended an hour ago today is past", isPastEvent({ start_at: new Date(now - 3 * H).toISOString(), end_at: new Date(now - 1 * H).toISOString() }, now));
+assert("started this morning, ends tonight is not past", !isPastEvent({ start_at: new Date(now - 3 * H).toISOString(), end_at: new Date(now + 6 * H).toISOString() }, now));
+assert("no end time, started earlier today is not past", !isPastEvent({ start_at: new Date(now - 3 * H).toISOString() }, now));
+assert("no end time, started yesterday is past", isPastEvent({ start_at: new Date(now - 30 * H).toISOString() }, now));
+assert("tomorrow is not past", !isPastEvent({ start_at: new Date(now + 24 * H).toISOString() }, now));
+assert("parsed shape (startAt/endAt) is understood", isPastEvent({ startAt: new Date(now - 48 * H).toISOString(), endAt: new Date(now - 40 * H).toISOString() }, now));
+assert("missing dates are not treated as past", !isPastEvent({}, now));
+
+const pastEntry = {
+  ...pageEntry,
+  api_id: "id-p-past",
+  event: { ...pageEntry.event, url: "p-past-event", api_id: "id-p-past", name: "Past Event", start_at: new Date(Date.now() - 3 * 86400000).toISOString(), end_at: new Date(Date.now() - 3 * 86400000 + 2 * H).toISOString() },
+};
+const dateVerifier = createStreamingVerifier({ maxResults: 10 });
+dateVerifier.push([
+  { url: "https://luma.com/p-past-event", source: "sf", entry: pastEntry },
+  { url: "https://luma.com/g-page-event", source: "sf", entry: pageEntry },
+]);
+dateVerifier.finish();
+const dateResult = await dateVerifier.done;
+assert("a past event never reaches the queue", !dateResult.events.some((e) => e.slug === "p-past-event") && dateResult.stats.rejectedPast === 0 && dateResult.stats.rejectedIneligible === 1);
+assert("the upcoming event still does", dateResult.events.some((e) => e.slug === "g-page-event"));
+
+// A cached verdict that has aged into the past is dropped at verification time.
+const staleOk = createStreamingVerifier({ maxResults: 10 });
+const agedEvent = { id: "aged", slug: "aged-event", url: "https://luma.com/aged-event", startAt: new Date(Date.now() - 2 * 86400000).toISOString(), endAt: new Date(Date.now() - 86400000).toISOString(), registrationAvailability: "open", isFree: true, city: "San Francisco", title: "Aged" };
+assert("isRegisterable rejects an aged parsed event", !(await import("../lib/discovery.js")).isRegisterable(agedEvent));
+staleOk.finish();
+await staleOk.done;
 globalThis.fetch = realFetch;
 assert("onEvent order matches the returned list", JSON.stringify(seen) === JSON.stringify(result.events.map((e) => e.slug)));
 assert("onProgress fires once per lookup", progress.length === 3 && progress[2].verified === 3 && progress[2].total === 3);
