@@ -37,7 +37,7 @@ function loadFormIntelligence() {
     "document",
     "window",
     src +
-      "\nreturn { classifyQuestion, answerForQuestion, classifyByInputAttributes, isCustomSelectInput, valueFitsInput, labelSimilarity, cleanLabel, isAboutOthers };"
+      "\nreturn { classifyQuestion, answerForQuestion, classifyByInputAttributes, isCustomSelectInput, valueFitsInput, labelSimilarity, cleanLabel, isAboutOthers, applyEventPersona };"
   );
   return fn(sandbox.document, sandbox.window);
 }
@@ -88,6 +88,17 @@ assert("'What's your work email?' is still an email field", fi.classifyQuestion(
 assert("'What is your LinkedIn profile?' is still linkedin", fi.classifyQuestion("What is your LinkedIn profile?") === "linkedin");
 assert("isAboutOthers flags 'their'", fi.isAboutOthers("please list their names"));
 assert("isAboutOthers does not flag a plain question", !fi.isAboutOthers("What is your GitHub?"));
+
+console.log("\nInvitation form (luma.com/baomaxxing)");
+const inviteProfile = { ...profile, job_title: "Founding Software Engineer", company: "Andever", default_answers: {} };
+assert("'current role or title' comes from the profile", fi.answerForQuestion("What is your current role or title?", inviteProfile) === "Founding Software Engineer");
+assert("'current title/role' too", fi.classifyQuestion("What's your current title/role?") === "job_title");
+assert("'company or organization you currently work with' is company", fi.answerForQuestion("What company or organization do you currently work with?", inviteProfile) === "Andever");
+assert("'most hoping to find at the event' is motivation (AI with profile context)", fi.classifyQuestion("What are you most hoping to find at the event?") === "motivation");
+assert("'what are you building… right now' has no canned hackathon answer", fi.answerForQuestion("What are you building, operating, researching, or exploring right now?", inviteProfile) === null);
+assert("'how do you share context with AI' is free text for the AI", fi.classifyQuestion("How do you share context with AI & your team today?") === "custom");
+assert("'X (Twitter) handle' returns the @handle", fi.answerForQuestion("What is your X (Twitter) handle?", { ...inviteProfile, twitter_handle: "zubairzafar" }) === "@zubairzafar");
+assert("founder-flavoured page keeps the real title without an explicit persona", fi.applyEventPersona(inviteProfile, "Founders & investors night", "startup pitch").job_title === "Founding Software Engineer");
 
 console.log("\nLabel cleaning");
 assert("zero-width spaces are stripped", fi.cleanLabel("Email​ *") === "Email");

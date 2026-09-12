@@ -141,6 +141,10 @@ export function ruleBasedFallback(profile, qType) {
         `I'm a ${profile.job_title} based in ${loc}, interested in AI/tech events ` +
         "where I can learn and meet other developers."
       );
+    case "building":
+      return profile.company
+        ? `${profile.job_title} at ${profile.company}, building AI products and tooling — happy to share more at the event.`
+        : `${profile.job_title} building AI products and tooling — happy to share more at the event.`;
     default:
       return null;
   }

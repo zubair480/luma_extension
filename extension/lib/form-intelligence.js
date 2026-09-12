@@ -323,6 +323,9 @@ function classifyQuestionRaw(l) {
   if (/role and company|role & company|current role and company|title and company|company and (role|title)/.test(l)) {
     return "role_company";
   }
+  if (/current role|role or title|title or role|title\s*\/\s*role|role\s*\/\s*title|current title|current position/.test(l)) {
+    return "job_title";
+  }
   if (/kind of role|role best describes|what role|best describes you|describes you best|describe your role/.test(l)) {
     return "role_category";
   }
@@ -376,7 +379,7 @@ function classifyQuestionRaw(l) {
   if (/fundrais|funding round|funding stage|\bfunding\b|raising (a )?(round|money|capital)|currently raising|are you raising|seeking investment|series [a-e]\b|pre-?seed|\bseed round\b/.test(l)) {
     return "fundraising";
   }
-  if (/\bwhy\b|what brings|tell us about|about yourself|\binterest|motivation|what do you hope/.test(l)) {
+  if (/\bwhy\b|what brings|tell us about|about yourself|\binterest|motivation|what do you hope|hoping to|hope to (find|get|meet|learn)|looking to (find|get|meet|learn)|what are you looking for/.test(l)) {
     return "motivation";
   }
   return "custom";
@@ -536,12 +539,14 @@ function answerForQuestion(label, profile, forcedType = null) {
       return profile.x || profile.twitter || (handle ? `@${handle}` : null) || profile.instagram || null;
     }
     case "building":
+      // No canned hackathon line: without a saved answer this goes to the model, which knows
+      // the job title and company, with an event-neutral rule fallback behind it.
       return (
         defaults["What are you building?"] ||
         defaults["What are you going to build?"] ||
         defaults.building ||
         profile.building ||
-        "A practical AI/agent prototype — I'll scope it with my team at the event."
+        null
       );
     case "job_seeking":
       return (
@@ -604,12 +609,14 @@ function answerForQuestion(label, profile, forcedType = null) {
 // Event-aware identity. The user presents as a founder at startup/pitch/investor events and as a
 // software engineer at hiring/career events. Persona map comes from the profile when present;
 // otherwise we synthesize one (founder override + the profile's own title/company as "engineer").
-const DEFAULT_FOUNDER_PERSONA = { job_title: "Founder", company: "Stealth Startup" };
-
+/**
+ * Personas are opt-in: the "Founder @ Stealth Startup" swap only exists when the profile defines
+ * a founder persona itself. Without one, every event gets the real job title and company, so a
+ * page that merely mentions founders or investors cannot rewrite who the user is.
+ */
 function personaMapFor(profile) {
   if (profile?.personas && Object.keys(profile.personas).length) return profile.personas;
   return {
-    founder: DEFAULT_FOUNDER_PERSONA,
     engineer: { job_title: profile?.job_title, company: profile?.company },
   };
 }
@@ -1641,7 +1648,7 @@ function isPaidEventPageWithTrust(doc = document, eventMeta = {}) {
 }
 
 function needsSmartAnswer(qType, label) {
-  if (["custom", "motivation", "admission", "community_member"].includes(qType)) return true;
+  if (["custom", "motivation", "admission", "community_member", "building"].includes(qType)) return true;
   const l = (label || "").toLowerCase();
   return l.includes("?") && l.length > 12;
 }
