@@ -344,15 +344,11 @@ export const DEFAULT_PROFILE = {
   phone: "",
   location: "San Francisco, CA",
   gender: "male",
-  job_title: "Software Engineer",
-  company: "Eastern Illinois University",
-  // Event-aware identity: founder-flavored events (startup/pitch/investor) present as Founder @
-  // Stealth Startup; everything else presents as the engineer identity.
+  job_title: "Founding Software Engineer",
+  company: "Andever AI (Stealth)",
+  // One identity for every event. Add a `personas` map (see lib/form-intelligence.js) only if a
+  // different title/company should be presented at certain kinds of events.
   default_persona: "engineer",
-  personas: {
-    founder: { job_title: "Founder", company: "Stealth Startup" },
-    engineer: { job_title: "Software Engineer", company: "Eastern Illinois University" },
-  },
   linkedin: "https://www.linkedin.com/in/zubair480",
   instagram: "zubair1105",
   x: "https://x.com/zubair_1105",
@@ -364,16 +360,16 @@ export const DEFAULT_PROFILE = {
   willing_to_pitch: "No, thank you.",
   default_answers: {
     "What brings you to this event?":
-      "I'm a Software Engineer & Full Stack Developer interested in AI and tech community events in San Francisco.",
+      "I'm a Founding Software Engineer at Andever AI (Stealth), interested in AI and tech community events in San Francisco.",
     "Why do you want to attend?":
       "I'm passionate about AI/tech and want to connect with the local developer community.",
     "Tell us about yourself":
-      "Software Engineer & Full Stack Developer at Eastern Illinois University. I build full-stack applications and follow AI/agent developments closely.",
+      "Founding Software Engineer at Andever AI (Stealth). I build full-stack and AI-agent products and follow agent developments closely.",
     "What is the book you are currently reading? Name and author :)":
       "The Pragmatic Programmer by David Thomas and Andrew Hunt",
     current_book: "The Pragmatic Programmer by David Thomas and Andrew Hunt",
-    "Company / Organization": "Eastern Illinois University",
-    "What company/school are you currently at?": "Eastern Illinois University",
+    "Company / Organization": "Andever AI (Stealth)",
+    "What company/school are you currently at?": "Andever AI (Stealth)",
     "What is your LinkedIn profile?": "https://www.linkedin.com/in/zubair480",
     "Personal Website or Portfolio Link": "https://github.com/zubair480",
     "How did you hear about the event?": "Luma",
@@ -384,7 +380,7 @@ export const DEFAULT_PROFILE = {
     "What are you going to build?": "A practical AI/agent prototype — I'll scope it with my team at the event.",
     "Dietary Restrictions?": "Halal or vegan",
     "Would you be willing to pitch?": "No, thank you.",
-    "Job Title": "Software Engineer & Full Stack Developer",
+    "Job Title": "Founding Software Engineer",
     LinkedIn: "https://www.linkedin.com/in/zubair480",
     Website: "https://github.com/zubair480",
   },

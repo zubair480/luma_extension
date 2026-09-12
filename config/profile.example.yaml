@@ -4,38 +4,8 @@ email: you@example.com
 work_email: ""
 phone: ""
 location: San Francisco, CA
-job_title: Software Engineer & Full Stack Developer
-company: Eastern Illinois University
+job_title: Your Title
+company: Your Company
 
-# Event-aware identity: founder events -> Founder@Stealth; everything else -> engineer.
+# One identity for every event.
 default_persona: engineer
-personas:
-  founder:
-    job_title: Founder
-    company: Stealth
-  engineer:
-    job_title: Software Engineer & Full Stack Developer
-    company: Eastern Illinois University
-linkedin: https://www.linkedin.com/in/zubair480
-github: https://github.com/zubair480
-website: https://github.com/zubair480
-x: https://x.com/zubair_1105
-twitter: https://x.com/zubair_1105
-twitter_handle: zubair_1105
-dietary: Halal or vegan
-willing_to_pitch: "No, thank you."
-
-default_answers:
-  "What brings you to this event?": "I'm a Software Engineer & Full Stack Developer interested in AI and tech community events in San Francisco."
-  "Why do you want to attend?": "I'm passionate about AI/tech and want to connect with the local developer community."
-  "Tell us about yourself": "Software Engineer & Full Stack Developer at Eastern Illinois University. I build full-stack applications and follow AI/agent developments closely."
-  "Company / Organization": Eastern Illinois University
-  "Job Title": Software Engineer & Full Stack Developer
-  "LinkedIn": https://www.linkedin.com/in/zubair480
-  "Website": https://github.com/zubair480
-  "Are you looking for a new role?": "Open to new opportunities."
-  "Are you currently fundraising?": "Not currently fundraising."
-  "Funding Round?": "Not currently fundraising."
-  "What are you going to build?": "A practical AI/agent prototype — I'll scope it with my team at the event."
-  "Dietary Restrictions?": "Halal or vegan"
-  "Would you be willing to pitch?": "No, thank you."

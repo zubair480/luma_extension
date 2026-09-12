@@ -2308,8 +2308,62 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 });
 
+/**
+ * Saved profiles that still carry the previous shipped identity are moved to the current one
+ * once. Only exact old default values are touched; anything the user typed themselves is kept.
+ */
+const LEGACY_IDENTITY = {
+  titles: new Set(["Software Engineer", "Software Engineer & Full Stack Developer"]),
+  company: "Eastern Illinois University",
+  answers: {
+    "Company / Organization": "Andever AI (Stealth)",
+    "What company/school are you currently at?": "Andever AI (Stealth)",
+    "Job Title": "Founding Software Engineer",
+    "What brings you to this event?":
+      "I'm a Founding Software Engineer at Andever AI (Stealth), interested in AI and tech community events in San Francisco.",
+    "Tell us about yourself":
+      "Founding Software Engineer at Andever AI (Stealth). I build full-stack and AI-agent products and follow agent developments closely.",
+  },
+};
+
+async function migrateLegacyProfile() {
+  try {
+    const { profile } = await chrome.storage.local.get("profile");
+    if (!profile) return;
+    let changed = false;
+    const next = { ...profile, default_answers: { ...(profile.default_answers || {}) } };
+
+    if (LEGACY_IDENTITY.titles.has(next.job_title) && next.company === LEGACY_IDENTITY.company) {
+      next.job_title = DEFAULT_PROFILE.job_title;
+      next.company = DEFAULT_PROFILE.company;
+      changed = true;
+    }
+    if (next.personas?.founder?.company === "Stealth Startup" || next.personas?.founder?.company === "Stealth") {
+      const { founder, ...rest } = next.personas;
+      next.personas = Object.keys(rest).length ? rest : undefined;
+      if (!next.personas) delete next.personas;
+      changed = true;
+    }
+    if (next.personas?.engineer?.company === LEGACY_IDENTITY.company) {
+      next.personas.engineer = { job_title: DEFAULT_PROFILE.job_title, company: DEFAULT_PROFILE.company };
+      changed = true;
+    }
+    for (const [question, answer] of Object.entries(LEGACY_IDENTITY.answers)) {
+      const current = next.default_answers[question];
+      if (typeof current === "string" && /Eastern Illinois University|Software Engineer & Full Stack Developer/.test(current)) {
+        next.default_answers[question] = answer;
+        changed = true;
+      }
+    }
+    if (changed) await chrome.storage.local.set({ profile: next });
+  } catch {
+    /* profile migration is best-effort */
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   await initExtensionStorage();
+  await migrateLegacyProfile();
   await mirrorRunControlToLocal();
   const { profile } = await chrome.storage.local.get("profile");
   if (!profile) {
@@ -2325,6 +2379,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(async () => {
   await initExtensionStorage();
+  await migrateLegacyProfile();
   await mirrorRunControlToLocal();
   try {
     await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
