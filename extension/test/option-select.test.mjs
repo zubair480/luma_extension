@@ -65,10 +65,18 @@ console.log("\npickConfidentOption / pickBestSelectOption");
 const fi = loadFormIntelligence();
 const profile = { job_title: "Software Engineer", company: "Acme" };
 
-// Confident match: gender question → male-ish option.
+// Confident match: gender question → the profile's own gender, never a guessed default.
 assert(
-  "Confident: gender picks a male option",
-  fi.pickConfidentOption(opts(["Female", "Male", "Non-binary"]), "Gender", profile)?.text === "Male"
+  "Confident: gender picks the profile's gender",
+  fi.pickConfidentOption(opts(["Female", "Male", "Non-binary"]), "Gender", { ...profile, gender: "female" })?.text === "Female"
+);
+assert(
+  "Confident: no gender in profile prefers 'Prefer not to say'",
+  fi.pickConfidentOption(opts(["Female", "Male", "Prefer not to say"]), "Gender", profile)?.text === "Prefer not to say"
+);
+assert(
+  "Confident: no gender and no opt-out option picks nothing confidently",
+  fi.pickConfidentOption(opts(["Female", "Male"]), "Gender", profile) === null
 );
 
 // No keyword match at all → confident returns null (so the LLM is consulted instead of guessing).
@@ -116,11 +124,11 @@ assert(
 console.log("\nevent persona");
 const personaProfile = {
   job_title: "Software Engineer",
-  company: "Eastern Illinois University",
+  company: "Example Labs",
   default_persona: "engineer",
   personas: {
     founder: { job_title: "Founder", company: "Stealth Startup" },
-    engineer: { job_title: "Software Engineer", company: "Eastern Illinois University" },
+    engineer: { job_title: "Software Engineer", company: "Example Labs" },
   },
 };
 assert(
@@ -136,7 +144,7 @@ assert("Founder persona uses Founder title", founderProfile.job_title === "Found
 assert("Founder persona uses Stealth Startup", founderProfile.company === "Stealth Startup");
 const engineerProfile = fi.applyEventPersona(personaProfile, "AI Agent Builders", "Software developer meetup");
 assert("Default engineer persona uses Software Engineer", engineerProfile.job_title === "Software Engineer");
-assert("Engineer persona uses Eastern Illinois University", engineerProfile.company === "Eastern Illinois University");
+assert("Engineer persona uses Example Labs", engineerProfile.company === "Example Labs");
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 if (failures.length) {

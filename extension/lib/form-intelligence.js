@@ -520,7 +520,10 @@ function answerForQuestion(label, profile, forcedType = null) {
     case "full_name": return `${profile.first_name} ${profile.last_name}`.trim();
     case "email": return profile.email;
     case "work_email": return profile.work_email || profile.email;
-    case "gender": return (profile.gender || "male").charAt(0).toUpperCase() + (profile.gender || "male").slice(1).toLowerCase();
+    case "gender": {
+      const g = String(profile.gender || "").trim();
+      return g ? g.charAt(0).toUpperCase() + g.slice(1) : null;
+    }
     case "phone": return profile.phone;
     case "location":
       return profile.location || "San Francisco, CA";
@@ -564,12 +567,7 @@ function answerForQuestion(label, profile, forcedType = null) {
         "Not currently fundraising."
       );
     case "dietary":
-      return (
-        profile.dietary ||
-        defaults["Dietary Restrictions?"] ||
-        defaults.dietary ||
-        "Halal or vegan."
-      );
+      return profile.dietary || defaults["Dietary Restrictions?"] || defaults.dietary || "No dietary restrictions.";
     case "pitch":
       return (
         defaults["Would you be willing to pitch?"] ||
@@ -581,11 +579,7 @@ function answerForQuestion(label, profile, forcedType = null) {
       return profile.company ? `${profile.job_title} at ${profile.company}` : profile.job_title;
     case "website": return profile.website || profile.github;
     case "book":
-      return (
-        defaults.current_book ||
-        defaults["What is the book you are currently reading? Name and author :)"] ||
-        "The Pragmatic Programmer by David Thomas and Andrew Hunt"
-      );
+      return defaults.current_book || defaults["What is the book you are currently reading? Name and author :)"] || null;
     case "community_member":
       return (
         defaults.community_member ||
@@ -873,7 +867,16 @@ function selectionPrefsFor(label, profile = null) {
     return ["yes", "already", "yep", "sure", "i am", "follow"];
   }
   if (l.includes("gender") || l === "sex") {
-    return ["male", "man", "m", "he/him"];
+    const g = String(profile?.gender || "").trim().toLowerCase();
+    if (g) {
+      const byGender = {
+        female: ["female", "woman", "she/her", "f"],
+        male: ["male", "man", "he/him", "m"],
+        "non-binary": ["non-binary", "nonbinary", "they/them", "enby"],
+      };
+      return [...(byGender[g] || [g]), "prefer not", "other"];
+    }
+    return ["prefer not", "rather not", "decline", "other", "non-binary"];
   }
   if (
     l.includes("kind of role") ||

@@ -336,55 +336,49 @@ export const QUERY_MAX_PAGES = 5;
 export const REGISTRATION_DELAY_MS = 12000;
 export const TAB_TIMEOUT_MS = 45000;
 
+/**
+ * Empty by design. Everything the forms need comes from the profile the user fills in from the
+ * side panel; a run refuses to start until the required fields are set. Saved answers grow as
+ * the agent answers custom questions.
+ */
 export const DEFAULT_PROFILE = {
-  first_name: "Zubair",
-  last_name: "Zafar",
-  email: "zubairzafar480@gmail.com",
+  first_name: "",
+  last_name: "",
+  email: "",
   work_email: "",
   phone: "",
   location: "San Francisco, CA",
-  gender: "male",
-  job_title: "Founding Software Engineer",
-  company: "Andever AI (Stealth)",
-  // One identity for every event. Add a `personas` map (see lib/form-intelligence.js) only if a
-  // different title/company should be presented at certain kinds of events.
+  gender: "",
+  job_title: "",
+  company: "",
   default_persona: "engineer",
-  linkedin: "https://www.linkedin.com/in/zubair480",
-  instagram: "zubair1105",
-  x: "https://x.com/zubair_1105",
-  twitter: "https://x.com/zubair_1105",
-  twitter_handle: "zubair_1105",
-  github: "https://github.com/zubair480",
-  website: "https://github.com/zubair480",
-  dietary: "Halal or vegan",
+  linkedin: "",
+  instagram: "",
+  x: "",
+  twitter: "",
+  twitter_handle: "",
+  github: "",
+  website: "",
+  dietary: "",
   willing_to_pitch: "No, thank you.",
-  default_answers: {
-    "What brings you to this event?":
-      "I'm a Founding Software Engineer at Andever AI (Stealth), interested in AI and tech community events in San Francisco.",
-    "Why do you want to attend?":
-      "I'm passionate about AI/tech and want to connect with the local developer community.",
-    "Tell us about yourself":
-      "Founding Software Engineer at Andever AI (Stealth). I build full-stack and AI-agent products and follow agent developments closely.",
-    "What is the book you are currently reading? Name and author :)":
-      "The Pragmatic Programmer by David Thomas and Andrew Hunt",
-    current_book: "The Pragmatic Programmer by David Thomas and Andrew Hunt",
-    "Company / Organization": "Andever AI (Stealth)",
-    "What company/school are you currently at?": "Andever AI (Stealth)",
-    "What is your LinkedIn profile?": "https://www.linkedin.com/in/zubair480",
-    "Personal Website or Portfolio Link": "https://github.com/zubair480",
-    "How did you hear about the event?": "Luma",
-    "Are you following @designmeetup on Instagram?": "Yes",
-    "Are you looking for a new role?": "Open to new opportunities.",
-    "Are you currently fundraising?": "Not currently fundraising.",
-    "Funding Round?": "Not currently fundraising.",
-    "What are you going to build?": "A practical AI/agent prototype — I'll scope it with my team at the event.",
-    "Dietary Restrictions?": "Halal or vegan",
-    "Would you be willing to pitch?": "No, thank you.",
-    "Job Title": "Founding Software Engineer",
-    LinkedIn: "https://www.linkedin.com/in/zubair480",
-    Website: "https://github.com/zubair480",
-  },
+  default_answers: {},
 };
+
+export const PROFILE_REQUIRED_FIELDS = [
+  ["first_name", "First name"],
+  ["last_name", "Last name"],
+  ["email", "Email"],
+  ["job_title", "Job title"],
+  ["company", "Company"],
+];
+
+export function missingProfileFields(profile = {}) {
+  return PROFILE_REQUIRED_FIELDS.filter(([key]) => !String(profile?.[key] || "").trim()).map(([, label]) => label);
+}
+
+export function isProfileComplete(profile = {}) {
+  return missingProfileFields(profile).length === 0;
+}
 
 export const LUMA_HEADERS = {
   Origin: "https://luma.com",

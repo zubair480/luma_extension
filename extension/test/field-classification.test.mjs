@@ -97,7 +97,7 @@ assert("'company or organization you currently work with' is company", fi.answer
 assert("'most hoping to find at the event' is motivation (AI with profile context)", fi.classifyQuestion("What are you most hoping to find at the event?") === "motivation");
 assert("'what are you building… right now' has no canned hackathon answer", fi.answerForQuestion("What are you building, operating, researching, or exploring right now?", inviteProfile) === null);
 assert("'how do you share context with AI' is free text for the AI", fi.classifyQuestion("How do you share context with AI & your team today?") === "custom");
-assert("'X (Twitter) handle' returns the @handle", fi.answerForQuestion("What is your X (Twitter) handle?", { ...inviteProfile, twitter_handle: "zubairzafar" }) === "@zubairzafar");
+assert("'X (Twitter) handle' returns the @handle", fi.answerForQuestion("What is your X (Twitter) handle?", { ...inviteProfile, twitter_handle: "ada_probe" }) === "@ada_probe");
 assert("founder-flavoured page keeps the real title without an explicit persona", fi.applyEventPersona(inviteProfile, "Founders & investors night", "startup pitch").job_title === "Founding Software Engineer");
 
 console.log("\nLabel cleaning");

@@ -21,6 +21,5 @@ for (const file of files) {
     process.exit(1);
   }
   fs.copyFileSync(src, path.join(destDir, file));
-  fs.copyFileSync(src, path.join(root, "offscreen", file));
   console.log(`Copied ${file}`);
 }

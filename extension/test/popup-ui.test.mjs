@@ -45,13 +45,38 @@ try {
   assert.equal(await page.locator(".source-link").count(), 4, "Expected four source links");
   assert.equal(await page.locator("#runBtn").count(), 1, "Expected one combined start button");
   assert.equal(await page.locator("#inviteBtn").count(), 1, "Expected an accept-invitations button");
-  assert.equal(await page.locator("#inviteBtn").isEnabled(), true, "Invitations button is disabled at idle");
   assert.match(
     await page.locator("#inviteBtn").innerText(),
     /accept my invitations/i,
     "Invitations button label is unclear"
   );
+
+  // A fresh install ships an empty profile: the setup banner shows and nothing can start.
+  assert.equal(await page.locator("#setupBanner").isVisible(), true, "Setup banner hidden on a fresh install");
+  assert.equal(await page.locator("#runBtn").isEnabled(), false, "Start button enabled without a profile");
+  assert.equal(await page.locator("#inviteBtn").isEnabled(), false, "Invitations button enabled without a profile");
+  const refused = await page.evaluate(() => chrome.runtime.sendMessage({ type: "START_RUN", source: "all" }));
+  assert.equal(refused?.ok, false, "Background started a run without a profile");
+  assert.equal(refused?.needsProfile, true, "Background refusal does not point at the profile");
+
+  // Filling the required fields and saving unlocks both start buttons.
+  await page.locator("#profileDetails").evaluate((el) => {
+    el.open = true;
+  });
+  await page.fill("#firstName", "Ada");
+  await page.fill("#lastName", "Probe");
+  await page.fill("#email", "ada.probe@example.com");
+  await page.fill("#jobTitle", "Engineer");
+  await page.fill("#company", "Example Labs");
+  await page.click("#saveProfile");
+  await page.waitForTimeout(600);
+  assert.equal(await page.locator("#setupBanner").isVisible(), false, "Setup banner still shown after saving a complete profile");
+  assert.equal(await page.locator("#inviteBtn").isEnabled(), true, "Invitations button is disabled at idle");
   assert.equal(await page.locator("#runBtn").isEnabled(), true, "Combined start button is disabled at idle");
+  const stored = await page.evaluate(() => chrome.storage.local.get("profile").then((r) => r.profile));
+  assert.equal(stored?.company, "Example Labs", "Saved profile did not persist");
+  assert.equal(stored?.instagram, "", "Saved profile carries a value the user never entered");
+  assert.equal(Object.keys(stored?.default_answers || {}).length, 0, "Saved profile carries answers the user never entered");
   assert.equal(await page.locator("#runCvBtn").count(), 0, "Old second start button still exists");
   assert.equal(await page.locator("#workEmail").count(), 1, "Work email field is missing");
   assert.equal(
@@ -66,6 +91,10 @@ try {
   );
   assert.equal(pageErrors.length, 0, `Popup page errors: ${pageErrors.join("; ")}`);
 
+  // The profile save above scrolled the panel and showed a toast; settle before the hit test.
+  await page.waitForTimeout(1700);
+  await page.locator("#runBtn").scrollIntoViewIfNeeded();
+  await page.waitForTimeout(200);
   const startHitTarget = await page.locator("#runBtn").evaluate((button) => {
     const rect = button.getBoundingClientRect();
     const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);

@@ -33,9 +33,48 @@ const fields = {
   phone: document.getElementById("phone"),
   jobTitle: document.getElementById("jobTitle"),
   company: document.getElementById("company"),
+  location: document.getElementById("location"),
   linkedin: document.getElementById("linkedin"),
   github: document.getElementById("github"),
+  website: document.getElementById("website"),
+  twitterHandle: document.getElementById("twitterHandle"),
+  instagram: document.getElementById("instagram"),
+  dietary: document.getElementById("dietary"),
+  gender: document.getElementById("gender"),
 };
+
+const setupBanner = document.getElementById("setupBanner");
+const setupBannerDetail = document.getElementById("setupBannerDetail");
+const profileDetails = document.getElementById("profileDetails");
+const REQUIRED_PROFILE = [
+  ["first_name", "first name"],
+  ["last_name", "last name"],
+  ["email", "email"],
+  ["job_title", "job title"],
+  ["company", "company"],
+];
+let currentProfile = null;
+let savedAnswers = {};
+
+function missingProfile(profile) {
+  return REQUIRED_PROFILE.filter(([key]) => !String(profile?.[key] || "").trim()).map(([, label]) => label);
+}
+
+function renderSetupBanner(profile) {
+  const missing = missingProfile(profile);
+  const incomplete = missing.length > 0;
+  setupBanner.classList.toggle("hidden", !incomplete);
+  if (incomplete) {
+    setupBannerDetail.textContent = `Still needed: ${missing.join(", ")}. Registration forms are filled from this profile.`;
+  }
+  return !incomplete;
+}
+
+document.getElementById("setupBannerBtn").addEventListener("click", () => {
+  profileDetails.open = true;
+  profileDetails.scrollIntoView({ behavior: "smooth", block: "start" });
+  fields.firstName.focus();
+});
 
 const SKIP_UI_STATUSES = new Set([
   "already_registered",
@@ -92,14 +131,22 @@ function statusLabel(result) {
 
 /** Both start buttons share one lifecycle: neither may launch while a run is in flight. */
 function setStartButtonsDisabled(disabled) {
-  runBtn.disabled = disabled;
-  inviteBtn.disabled = disabled;
+  // Nothing can start until the profile has the fields the forms need.
+  const blocked = disabled || missingProfile(currentProfile).length > 0;
+  runBtn.disabled = blocked;
+  inviteBtn.disabled = blocked;
+}
+
+let lastRunState = null;
+function isRunActiveState(state) {
+  return Boolean(state && ACTIVE_PHASES.has(state.phase));
 }
 
 function setRunControls(state) {
-  const active = state && ACTIVE_PHASES.has(state.phase);
+  lastRunState = state;
+  const active = isRunActiveState(state);
   runControls.classList.toggle("hidden", !active && state?.phase !== "stopping");
-  setStartButtonsDisabled(Boolean(active));
+  setStartButtonsDisabled(active || missingProfile(currentProfile).length > 0);
 
   if (!active) {
     pauseBtn.classList.remove("is-resume");
@@ -109,7 +156,7 @@ function setRunControls(state) {
     pauseBtn.disabled = true;
     skipBtn.disabled = true;
     if (!state || FINISHED_PHASES.has(state.phase)) {
-      setStartButtonsDisabled(false);
+      setStartButtonsDisabled(missingProfile(currentProfile).length > 0);
     }
     return;
   }
@@ -379,68 +426,111 @@ function renderState(state) {
 }
 
 function loadProfile(profile) {
-  if (!profile) return;
-  fields.firstName.value = profile.first_name || "";
-  fields.lastName.value = profile.last_name || "";
-  fields.email.value = profile.email || "";
-  fields.workEmail.value = profile.work_email || "";
-  fields.phone.value = profile.phone || "";
-  fields.jobTitle.value = profile.job_title || "";
-  fields.company.value = profile.company || "";
-  fields.linkedin.value = profile.linkedin || "";
-  fields.github.value = profile.github || "";
-  renderSavedAnswers(profile.default_answers || {});
+  currentProfile = profile || {};
+  const value = (key) => (profile?.[key] == null ? "" : String(profile[key]));
+  fields.firstName.value = value("first_name");
+  fields.lastName.value = value("last_name");
+  fields.email.value = value("email");
+  fields.workEmail.value = value("work_email");
+  fields.phone.value = value("phone");
+  fields.jobTitle.value = value("job_title");
+  fields.company.value = value("company");
+  fields.location.value = value("location");
+  fields.linkedin.value = value("linkedin");
+  fields.github.value = value("github");
+  fields.website.value = value("website");
+  fields.twitterHandle.value = value("twitter_handle").replace(/^@/, "");
+  fields.instagram.value = value("instagram").replace(/^@/, "");
+  fields.dietary.value = value("dietary");
+  fields.gender.value = value("gender").toLowerCase();
+  savedAnswers = { ...(profile?.default_answers || {}) };
+  renderSavedAnswers(savedAnswers);
+  const complete = renderSetupBanner(profile);
+  setStartButtonsDisabled(!complete || isRunActiveState(lastRunState));
 }
 
 function renderSavedAnswers(defaultAnswers) {
-  const section = document.getElementById("savedAnswersSection");
   const list = document.getElementById("savedAnswersList");
-  const entries = Object.entries(defaultAnswers);
+  const entries = Object.entries(defaultAnswers || {});
+  list.innerHTML = "";
 
   if (!entries.length) {
-    section.classList.add("hidden");
+    const li = document.createElement("li");
+    li.textContent = "No saved answers yet.";
+    li.style.opacity = "0.7";
+    list.appendChild(li);
     return;
   }
 
-  section.classList.remove("hidden");
-  list.innerHTML = "";
   for (const [question, answer] of entries) {
     const li = document.createElement("li");
+    const row = document.createElement("div");
+    row.className = "saved-answer-row";
     const strong = document.createElement("strong");
     strong.textContent = question;
-    li.appendChild(strong);
-    li.appendChild(document.createElement("br"));
-    li.appendChild(document.createTextNode(answer));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "saved-answer-remove";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => {
+      delete savedAnswers[question];
+      renderSavedAnswers(savedAnswers);
+    });
+    row.appendChild(strong);
+    row.appendChild(remove);
+    const textarea = document.createElement("textarea");
+    textarea.value = String(answer ?? "");
+    textarea.addEventListener("input", () => {
+      savedAnswers[question] = textarea.value;
+    });
+    li.appendChild(row);
+    li.appendChild(textarea);
     list.appendChild(li);
   }
 }
 
+document.getElementById("addAnswerBtn").addEventListener("click", () => {
+  const q = document.getElementById("newAnswerQuestion").value.trim();
+  const a = document.getElementById("newAnswerText").value.trim();
+  if (!q || !a) {
+    showControlToast("Enter both the question and the answer", true);
+    return;
+  }
+  savedAnswers[q] = a;
+  document.getElementById("newAnswerQuestion").value = "";
+  document.getElementById("newAnswerText").value = "";
+  renderSavedAnswers(savedAnswers);
+});
+
 function getProfileFromForm() {
+  const v = (el) => el.value.trim();
+  const handle = (el) => v(el).replace(/^@/, "");
+  const twitterHandle = handle(fields.twitterHandle);
+  const cleaned = {};
+  for (const [question, answer] of Object.entries(savedAnswers)) {
+    const text = String(answer ?? "").trim();
+    if (question.trim() && text) cleaned[question.trim()] = text;
+  }
   return {
-    first_name: fields.firstName.value.trim(),
-    last_name: fields.lastName.value.trim(),
-    email: fields.email.value.trim(),
-    work_email: fields.workEmail.value.trim() || fields.email.value.trim(),
-    phone: fields.phone.value.trim(),
-    location: "San Francisco, CA",
-    job_title: fields.jobTitle.value.trim(),
-    company: fields.company.value.trim(),
+    first_name: v(fields.firstName),
+    last_name: v(fields.lastName),
+    email: v(fields.email),
+    work_email: v(fields.workEmail) || v(fields.email),
+    phone: v(fields.phone),
+    location: v(fields.location) || "San Francisco, CA",
+    job_title: v(fields.jobTitle),
+    company: v(fields.company),
     default_persona: "engineer",
-    personas: {
-      founder: { job_title: "Founder", company: "Stealth Startup" },
-      engineer: { job_title: "Software Engineer", company: "Eastern Illinois University" },
-    },
-    linkedin: fields.linkedin.value.trim(),
-    instagram: "zubair1105",
-    github: fields.github.value.trim(),
-    website: fields.github.value.trim(),
-    default_answers: {
-      "What brings you to this event?":
-        "I'm a Software Engineer interested in AI and tech community events in San Francisco.",
-      "Why do you want to attend?":
-        "I'm passionate about AI/tech and want to connect with the local developer community.",
-      "Tell us about yourself": `Software Engineer at Eastern Illinois University. I build full-stack applications and follow AI/agent developments closely.`,
-    },
+    linkedin: v(fields.linkedin),
+    github: v(fields.github),
+    website: v(fields.website) || v(fields.github),
+    twitter_handle: twitterHandle,
+    x: twitterHandle ? `https://x.com/${twitterHandle}` : "",
+    twitter: twitterHandle ? `https://x.com/${twitterHandle}` : "",
+    instagram: handle(fields.instagram),
+    dietary: v(fields.dietary),
+    gender: fields.gender.value,
+    default_answers: cleaned,
   };
 }
 

@@ -36,6 +36,8 @@ import {
   isValidEventHref,
   isWomenOnlyEvent,
   isValidEventSlug,
+  isProfileComplete,
+  missingProfileFields,
 } from "./lib/constants.js";
 import "./dev-reload.js";
 
@@ -1552,6 +1554,16 @@ async function closeTabsSafely(tabIds = []) {
 async function startRun() {
   await syncRunControlFromSession();
   await healStaleRunState();
+  {
+    const profile = await getProfile();
+    if (!isProfileComplete(profile)) {
+      return {
+        ok: false,
+        error: `Set up your profile first — missing: ${missingProfileFields(profile).join(", ")}`,
+        needsProfile: true,
+      };
+    }
+  }
   if (await isRunActiveFromStorage()) {
     return { ok: false, error: "A run is already in progress" };
   }
@@ -1842,6 +1854,16 @@ function orderedSourceList() {
 async function startInviteRun() {
   await syncRunControlFromSession();
   await healStaleRunState();
+  {
+    const profile = await getProfile();
+    if (!isProfileComplete(profile)) {
+      return {
+        ok: false,
+        error: `Set up your profile first — missing: ${missingProfileFields(profile).join(", ")}`,
+        needsProfile: true,
+      };
+    }
+  }
   if (await isRunActiveFromStorage()) {
     return { ok: false, error: "A run is already in progress" };
   }
@@ -2294,6 +2316,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           profile: {
             ...current,
             ...incoming,
+            default_answers:
+              incoming.default_answers && typeof incoming.default_answers === "object"
+                ? incoming.default_answers
+                : current.default_answers || {},
             personas: { ...(current.personas || {}), ...(incoming.personas || {}) },
             // Keep answers learned from forms when the visible profile fields are saved again.
             default_answers: {
@@ -2334,8 +2360,8 @@ async function migrateLegacyProfile() {
     const next = { ...profile, default_answers: { ...(profile.default_answers || {}) } };
 
     if (LEGACY_IDENTITY.titles.has(next.job_title) && next.company === LEGACY_IDENTITY.company) {
-      next.job_title = DEFAULT_PROFILE.job_title;
-      next.company = DEFAULT_PROFILE.company;
+      next.job_title = LEGACY_IDENTITY.answers["Job Title"];
+      next.company = LEGACY_IDENTITY.answers["Company / Organization"];
       changed = true;
     }
     if (next.personas?.founder?.company === "Stealth Startup" || next.personas?.founder?.company === "Stealth") {
@@ -2345,7 +2371,10 @@ async function migrateLegacyProfile() {
       changed = true;
     }
     if (next.personas?.engineer?.company === LEGACY_IDENTITY.company) {
-      next.personas.engineer = { job_title: DEFAULT_PROFILE.job_title, company: DEFAULT_PROFILE.company };
+      next.personas.engineer = {
+        job_title: LEGACY_IDENTITY.answers["Job Title"],
+        company: LEGACY_IDENTITY.answers["Company / Organization"],
+      };
       changed = true;
     }
     for (const [question, answer] of Object.entries(LEGACY_IDENTITY.answers)) {

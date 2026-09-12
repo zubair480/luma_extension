@@ -67,9 +67,9 @@
       setNativeValueVisual,
       async runFullDemo() {
         enableAgentCursor("Starting registration…");
-        await setNativeValueVisual(document.getElementById("name"), "Zubair Zafar", "What is your full name?");
-        await setNativeValueVisual(document.getElementById("email"), "zubairzafar480@gmail.com", "Email address");
-        await setNativeValueVisual(document.getElementById("company"), "Eastern Illinois University", "Company or school");
+        await setNativeValueVisual(document.getElementById("name"), "Ada Probe", "What is your full name?");
+        await setNativeValueVisual(document.getElementById("email"), "ada.probe@example.com", "Email address");
+        await setNativeValueVisual(document.getElementById("company"), "Example Labs", "Company or school");
         await visualClick(document.getElementById("role"), "Selecting role…");
         document.getElementById("role").value = "engineer";
         document.getElementById("role").dispatchEvent(new Event("change", { bubbles: true }));

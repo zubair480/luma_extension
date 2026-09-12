@@ -22,6 +22,12 @@
         <div class="mode-badge"><span></span> Auto RSVP</div>
       </header>
 
+      <div id="setupBanner" class="setup-banner hidden" role="status">
+        <strong>Set up your profile to start</strong>
+        <span id="setupBannerDetail">Name, email, job title and company are needed to fill registration forms.</span>
+        <button id="setupBannerBtn" class="secondary-btn" type="button">Open profile</button>
+      </div>
+
       <section class="launch-panel" aria-labelledby="launchHeading">
         <div class="section-heading">
           <div>
@@ -189,7 +195,7 @@
         </div>
       </details>
 
-      <details class="profile-details">
+      <details class="profile-details" id="profileDetails">
         <summary>
           <span class="summary-title">
             <span class="summary-icon profile-icon" aria-hidden="true">ME</span>
@@ -198,21 +204,42 @@
           <span class="summary-badge">Edit</span>
         </summary>
         <div class="details-body">
+          <p class="profile-hint">Required fields are marked. Everything else is optional and only used when a form asks for it.</p>
           <div class="profile-grid">
-            <label>First name<input id="firstName" /></label>
-            <label>Last name<input id="lastName" /></label>
-            <label>Email<input id="email" type="email" /></label>
+            <label>First name *<input id="firstName" autocomplete="given-name" /></label>
+            <label>Last name *<input id="lastName" autocomplete="family-name" /></label>
+            <label>Email *<input id="email" type="email" autocomplete="email" /></label>
             <label>Work email<input id="workEmail" type="email" /></label>
-            <label>Phone<input id="phone" /></label>
-            <label>Job title<input id="jobTitle" /></label>
-            <label>Company<input id="company" /></label>
-            <label>LinkedIn<input id="linkedin" /></label>
-            <label>GitHub<input id="github" /></label>
+            <label>Phone<input id="phone" type="tel" autocomplete="tel" /></label>
+            <label>Job title *<input id="jobTitle" autocomplete="organization-title" /></label>
+            <label>Company *<input id="company" autocomplete="organization" /></label>
+            <label>City / location<input id="location" placeholder="San Francisco, CA" /></label>
+            <label>LinkedIn URL<input id="linkedin" type="url" placeholder="https://www.linkedin.com/in/…" /></label>
+            <label>GitHub URL<input id="github" type="url" placeholder="https://github.com/…" /></label>
+            <label>Website / portfolio<input id="website" type="url" /></label>
+            <label>X (Twitter) handle<input id="twitterHandle" placeholder="handle, without @" /></label>
+            <label>Instagram handle<input id="instagram" placeholder="handle, without @" /></label>
+            <label>Dietary needs<input id="dietary" placeholder="e.g. Vegetarian" /></label>
+            <label>Gender (only if a form asks)
+              <select id="gender">
+                <option value="">Prefer not to say</option>
+                <option value="female">Female</option>
+                <option value="male">Male</option>
+                <option value="non-binary">Non-binary</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
           </div>
           <button id="saveProfile" class="secondary-btn save-profile-btn">Save profile</button>
-          <div id="savedAnswersSection" class="saved-answers hidden">
-            <p class="saved-answers-title">Auto-saved form answers</p>
+          <div id="savedAnswersSection" class="saved-answers">
+            <p class="saved-answers-title">Saved form answers</p>
+            <p class="profile-hint">Used word for word when a form asks the same question. The agent adds answers here as it goes; edit or remove them any time.</p>
             <ul id="savedAnswersList"></ul>
+            <div class="saved-answer-add">
+              <input id="newAnswerQuestion" placeholder="Question as it appears on the form" />
+              <textarea id="newAnswerText" rows="2" placeholder="Your answer"></textarea>
+              <button id="addAnswerBtn" class="secondary-btn" type="button">Add answer</button>
+            </div>
           </div>
         </div>
       </details>

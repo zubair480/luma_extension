@@ -81,9 +81,9 @@ async function testFixturePage() {
   // 3. Full demo fills all fields with values
   await page.evaluate(async () => disableAgentCursor());
   const filled = await page.evaluate(async () => window.__testHarness.runFullDemo());
-  assert(filled.name === "Zubair Zafar", `Name not filled: ${filled.name}`);
-  assert(filled.email === "zubairzafar480@gmail.com", `Email not filled: ${filled.email}`);
-  assert(filled.company === "Eastern Illinois University", `Company not filled: ${filled.company}`);
+  assert(filled.name === "Ada Probe", `Name not filled: ${filled.name}`);
+  assert(filled.email === "ada.probe@example.com", `Email not filled: ${filled.email}`);
+  assert(filled.company === "Example Labs", `Company not filled: ${filled.company}`);
   assert(filled.role === "engineer", `Role not filled: ${filled.role}`);
   assert(filled.bio === "Software Engineer", `Bio not filled: ${filled.bio}`);
   results.push("✓ Full fill demo sets all field values correctly");

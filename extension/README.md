@@ -180,7 +180,11 @@ The extension will:
 
 ## Your profile
 
-Pre-loaded with your details. Edit anytime via **Your profile** in the popup.
+Empty on first install. The panel refuses to start a run until first name, last name, email, job
+title and company are set; open **Your profile** to fill them in. Location, LinkedIn, GitHub,
+website, X and Instagram handles, dietary needs and gender are optional and only used when a form
+asks. **Saved form answers** are used word for word when a form repeats a question; the agent adds
+to them as it answers custom questions, and you can edit or remove any of them.
 
 ## Notes
 
