@@ -195,6 +195,25 @@ retried; the event is reported as unconfirmed so you can look at the tab. Previo
 re-filled and re-submitted up to five times when it could not match the page wording, which is
 what looked like a long stop after each submit.
 
+### The on-device model
+
+Free-text answers come from a small model running inside the extension (an offscreen document,
+which Chrome allows to use WebGPU). With a GPU adapter available it loads
+`onnx-community/Qwen2.5-0.5B-Instruct` (q4, about 480 MB, downloaded once); without one it falls
+back to `HuggingFaceTB/SmolLM2-360M-Instruct` on WebAssembly. Generation is greedy, one grounded
+sentence (two for a textarea), through the model's own chat template, and any output that looks
+like token salad or an echo of the prompt is discarded rather than typed into a form. Typical
+answer time on a GPU is 5–8 seconds; on WebAssembly it can be a minute.
+
+Two earlier defects made the model silently unavailable, so every free-text field got the
+rule-based stand-in: the runner called `chrome.storage` (not available to offscreen documents)
+and the original model repository (`onnx-community/SmolLM2-360M-Instruct`) went private.
+`npm run probe:local-llm` loads the model in a fresh Chrome and prints real answers with timing.
+
+For the best answers on questions you care about, add them under **Saved form answers** in the
+panel; those are used word for word. A cloud provider (OpenAI key or a local Ollama model) can be
+configured in the panel and is used before the on-device model when set.
+
 ### When the model cannot answer
 
 Free-text answers come from the on-device model. If it is not ready (first-ever use downloads it)

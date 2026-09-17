@@ -15,6 +15,7 @@
     "probe:menu-close": "node test/live-menu-close.probe.mjs",
     "probe:open-second": "node test/live-open-second.probe.mjs",
     "probe:single-select": "node test/live-single-select.probe.mjs",
+    "probe:local-llm": "node test/live-local-llm.probe.mjs",
     "test:visual": "node test/visual-cursor.test.mjs",
     "test:audit": "node test/full-audit.test.mjs",
     "test:options": "node test/option-select.test.mjs",

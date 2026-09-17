@@ -5,20 +5,20 @@
 export function buildSystemPrompt(fieldType) {
   const lengthHint =
     fieldType === "textarea"
-      ? "Write 2-3 sentences."
-      : "Write one short sentence (under 120 characters if possible).";
+      ? "Reply with at most two sentences, under 45 words in total."
+      : "Reply with exactly one sentence, under 25 words.";
 
   return (
-    "You fill out Luma event registration forms. " +
+    "You are the attendee, writing one answer on an event registration form, in your own voice. " +
     `${lengthHint} ` +
-    "Answer ONLY the question asked — do not repeat the question. " +
-    "Be specific, professional, and authentic. Use ONLY the profile facts provided. " +
-    "Do NOT invent URLs, social handles, usernames, phone numbers, employers, dates, or statistics " +
-    "that are not in the profile — if a detail is unknown, give a brief honest generic answer instead of guessing. " +
-    "For location/city questions use the profile location. " +
-    "For community membership questions, answer honestly and positively. " +
-    "For admission questions, give a concise compelling reason tied to their background. " +
-    "Never mention AI. No quotes around the answer."
+    "Always write as \"I\" (never refer to the attendee by name or as he/she). Plain prose: no bullet " +
+    "points, no lists, no headings, no quotes, no preamble, and do not repeat or define the question. " +
+    "Answer the question directly: if it asks what you want to discuss, learn or find, say what you " +
+    "want; if it asks what you are working on, say what you work on. " +
+    "Use only the facts in the profile. Do not invent products, research areas, employers, " +
+    "numbers, links or handles; if the profile does not cover the question, answer with what " +
+    "you do at your company and what you want from this event. " +
+    "Never mention being an assistant or a model."
   );
 }
 
@@ -86,17 +86,19 @@ export function buildUserPrompt({ question, profile, eventTitle, fieldType }) {
     .map(([q, a]) => `- ${q}: ${a}`)
     .join("\n");
 
+  const about = [
+    profile.job_title && profile.company ? `${profile.job_title} at ${profile.company}` : profile.job_title || profile.company,
+    profile.location ? `based in ${profile.location}` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
   return (
-    `Event: ${eventTitle || "SF tech / AI community event"}\n` +
-    `Question: ${question}\n` +
-    `Field type: ${fieldType || "text"}\n\n` +
-    `Profile:\n` +
-    `- Name: ${profile.first_name} ${profile.last_name}\n` +
-    `- Title: ${profile.job_title}\n` +
-    `- Company: ${profile.company}\n` +
-    `- Location: ${profile.location || "San Francisco, CA"}\n` +
-    `- LinkedIn: ${profile.linkedin || "n/a"}\n` +
-    (saved ? `\nSaved answers:\n${saved}` : "")
+    `Event: ${eventTitle || "a tech / AI community event"}\n` +
+    `Attendee: ${profile.first_name} ${profile.last_name}, ${about || "attendee"}.\n` +
+    (saved ? `Things the attendee has said before:\n${saved}\n` : "") +
+    `\nForm question: ${question}\n` +
+    `Answer (${fieldType === "textarea" ? "two sentences max" : "one sentence"}):`
   );
 }
 
@@ -108,19 +110,59 @@ export function buildChatPrompt(system, user) {
   );
 }
 
+/**
+ * Turn raw model output into form-ready text: strip chat markers, bullets and numbering, join
+ * lines, keep whole sentences only (one for a text field, two for a textarea), drop repeats and
+ * any unfinished tail. Returns "" when nothing usable remains.
+ */
 export function trimAnswer(text, fieldType) {
-  let answer = (text || "")
-    .trim()
-    .replace(/^["']|["']$/g, "")
+  let raw = (text || "")
     .split(/<\|im_end\|>/)[0]
     .split("<|im_start|>")[0]
+    .replace(/^\s*(answer|response)\s*:\s*/i, "")
     .trim();
-  if (fieldType !== "textarea" && answer.length > 280) {
-    const cut = answer.slice(0, 277);
-    const lastSpace = cut.lastIndexOf(" ");
-    answer = (lastSpace > 80 ? cut.slice(0, lastSpace) : cut) + "…";
+  if (!raw) return "";
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:[-*•]+|\d+[.)])\s*/, "").trim())
+    .filter(Boolean);
+  let joined = lines
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/([,.;:!?])\1+/g, "$1")
+    .replace(/^["'“”]+|["'“”]+$/g, "")
+    .trim();
+  if (!joined) return "";
+  // A reply that starts mid-sentence ("which is similar…") is a fragment, not an answer.
+  if (!/^[A-Z0-9"'“(]/.test(joined)) {
+    const firstProper = joined.search(/(?:^|[.!?]\s+)[A-Z]/);
+    joined = firstProper >= 0 ? joined.slice(joined.indexOf(joined.match(/[A-Z]/)[0], firstProper)).trim() : "";
+    if (!joined) return "";
   }
-  return answer;
+
+  const maxSentences = fieldType === "textarea" ? 2 : 1;
+  const sentences = joined.match(/[^.!?]+[.!?]+(?=\s|$)/g) || [];
+  const seen = new Set();
+  const kept = [];
+  for (const s of sentences) {
+    const clean = s.trim();
+    const key = clean.toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    if (!clean || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(clean);
+    if (kept.length >= maxSentences) break;
+  }
+  let answer = kept.join(" ");
+  if (!answer) {
+    // No sentence terminator at all: keep the text but cut it to a clean word boundary.
+    const limit = fieldType === "textarea" ? 260 : 160;
+    answer = joined.length > limit ? joined.slice(0, limit).replace(/\s+\S*$/, "") : joined;
+  }
+  const cap = fieldType === "textarea" ? 320 : 200;
+  if (answer.length > cap) answer = answer.slice(0, cap).replace(/\s+\S*$/, "").replace(/[,;:]$/, "") + ".";
+  return answer.trim();
 }
 
 export function ruleBasedFallback(profile, qType, { eventTitle = "", question = "" } = {}) {

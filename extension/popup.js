@@ -546,17 +546,17 @@ async function refreshState() {
 function renderLocalAiStatus(status) {
   const el = document.getElementById("localAiStatus");
   if (!status || status.state === "idle") {
-    el.textContent = "Model not loaded — click “Download / warm up model” (one-time ~200MB download)";
+    el.textContent = "Model not loaded — click “Prepare local AI” (one-time download, ~480MB on GPU / ~390MB on CPU)";
     el.className = "local-ai-status";
     return;
   }
   el.className = "local-ai-status";
   if (status.state === "loading") {
     el.classList.add("is-loading");
-    el.textContent = status.progress || "Downloading SmolLM2-360M…";
+    el.textContent = status.progress || "Downloading the on-device model…";
   } else if (status.state === "ready") {
     el.classList.add("is-ready");
-    el.textContent = `Ready — ${status.model || "SmolLM2-360M"} (on-device, no API)`;
+    el.textContent = `Ready — ${(status.model || "on-device model").split("/").pop()}${status.device ? ` on ${status.device}` : ""} (on-device, no API)`;
   } else if (status.state === "error") {
     el.classList.add("is-error");
     el.textContent = `Error: ${status.error || "Model failed to load"}`;

@@ -4,7 +4,7 @@
 
 const OFFSCREEN_PATH = "offscreen/offscreen.html";
 
-export const LOCAL_MODEL_ID = "onnx-community/SmolLM2-360M-Instruct";
+export const LOCAL_MODEL_ID = "onnx-community/Qwen2.5-0.5B-Instruct (GPU) / HuggingFaceTB/SmolLM2-360M-Instruct (CPU)";
 
 export async function hasOffscreenDocument() {
   if (!chrome.offscreen) return false;
@@ -23,7 +23,7 @@ export async function ensureOffscreenDocument() {
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_PATH,
     reasons: ["WORKERS"],
-    justification: "Run SmolLM2-360M on-device for registration form answers (no cloud API)",
+    justification: "Run a small on-device language model for registration form answers (no cloud API)",
   });
 
   await sleep(300);

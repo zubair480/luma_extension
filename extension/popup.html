@@ -162,8 +162,8 @@
         </summary>
         <div class="details-body">
           <p class="llm-hint">
-            SmolLM2-360M answers custom registration questions locally. The first use downloads
-            about 200MB, then stays cached.
+            A small on-device model answers custom registration questions locally: Qwen2.5-0.5B on
+            your GPU (about 480MB, downloaded once) or SmolLM2-360M without one (about 390MB).
           </p>
           <p id="localAiStatus" class="local-ai-status">Checking model…</p>
           <div class="llm-actions">
@@ -179,7 +179,7 @@
                 <label class="full-width">
                   Provider
                   <select id="llmProvider">
-                    <option value="local">Local only (SmolLM2-360M)</option>
+                    <option value="local">Local only (on-device model)</option>
                     <option value="openai">OpenAI (gpt-4o-mini)</option>
                     <option value="ollama">Ollama (local server)</option>
                   </select>

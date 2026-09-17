@@ -1,5 +1,10 @@
 import { createStreamingVerifier, compareEligibleEvents, isPastEvent, lookupRsvpStatus } from "./lib/discovery.js";
 import { discoverCerebralValleyViaApi } from "./lib/cv-api-discovery.js";
+import { sendToOffscreen } from "./lib/local-llm-bridge.js";
+
+function sendToOffscreenEnv() {
+  return sendToOffscreen({ type: "LOCAL_LLM_ENV" }, 10000);
+}
 import {
   discoverFoundersClubEvents,
   FOUNDERS_CLUB_HOME_URL,
@@ -2273,6 +2278,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "LOCAL_LLM_ENV") {
+    sendToOffscreenEnv()
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (message.type === "LOCAL_LLM_STATUS_UPDATE") {
+    // The offscreen model runner cannot touch chrome.storage; it reports here instead.
+    chrome.storage.local
+      .set({ localLlmStatus: message.status || {} })
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
   if (message.type === "CHECK_RSVP") {
     lookupRsvpStatus(message.slug)
       .then((res) => sendResponse(res))
@@ -2327,12 +2348,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         answerRegistrationQuestion({
           question: message.question || "Why should we allow you to attend this event?",
           profile,
-          eventTitle: "Test event",
-          fieldType: "textarea",
-          qType: "admission",
+          eventTitle: message.eventTitle || "Test event",
+          fieldType: message.fieldType || "textarea",
+          qType: message.qType || "custom",
         })
       )
-      .then((answer) => sendResponse({ answer }))
+      .then((answer) => sendResponse({ answer, ...getLastAnswerSource() }))
       .catch((err) => sendResponse({ answer: null, error: err.message }));
     return true;
   }

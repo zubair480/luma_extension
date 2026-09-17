@@ -5,15 +5,20 @@ import { pipeline, env } from "@huggingface/transformers";
 import {
   buildSystemPrompt,
   buildUserPrompt,
-  buildChatPrompt,
   buildOptionSelectSystemPrompt,
   buildOptionSelectUserPrompt,
   parseOptionChoice,
   trimAnswer,
-  ruleBasedFallback,
 } from "../lib/prompt-utils.js";
 
-const MODEL_ID = "onnx-community/SmolLM2-360M-Instruct";
+/**
+ * Two model tiers. With WebGPU, Qwen2.5-0.5B-Instruct (about 480 MB, q4f16) — noticeably better
+ * at answering a form question in one grounded sentence. Without a GPU, SmolLM2-360M (q4, WASM)
+ * keeps the feature working on any machine.
+ */
+const GPU_MODEL_ID = "onnx-community/Qwen2.5-0.5B-Instruct";
+const CPU_MODEL_ID = "HuggingFaceTB/SmolLM2-360M-Instruct";
+let MODEL_ID = CPU_MODEL_ID;
 
 env.useBrowserCache = true;
 env.allowLocalModels = false;
@@ -23,6 +28,37 @@ let loadPromise = null;
 let modelState = "idle";
 let loadError = null;
 let loadProgress = "";
+let deviceUsed = null;
+
+/** WebGPU when the offscreen document can get an adapter; otherwise single-threaded WASM. */
+async function pickDevice() {
+  try {
+    if (navigator.gpu && (await navigator.gpu.requestAdapter())) return "webgpu";
+  } catch {
+    /* no adapter */
+  }
+  return "wasm";
+}
+
+/**
+ * Offscreen documents get chrome.runtime only — no chrome.storage. Status goes to the background
+ * as a message and is written to storage there. Never throws: status is best-effort.
+ */
+function reportStatus(status) {
+  try {
+    if (chrome.storage?.local?.set) {
+      Promise.resolve(chrome.storage.local.set({ localLlmStatus: status })).catch(() => {});
+      return;
+    }
+  } catch {
+    /* fall through to messaging */
+  }
+  try {
+    chrome.runtime.sendMessage({ type: "LOCAL_LLM_STATUS_UPDATE", status }, () => void chrome.runtime.lastError);
+  } catch {
+    /* background may be asleep; the next status will get through */
+  }
+}
 
 function formatError(err) {
   if (!err) return "Unknown error";
@@ -55,7 +91,7 @@ env.progressCallback = (progress) => {
       const loaded = progress.loaded ?? 0;
       const pct = Math.round((loaded / progress.total) * 100);
       loadProgress = `Downloading model… ${pct}%`;
-      chrome.storage.local.set({ localLlmStatus: { state: "loading", progress: loadProgress } });
+      reportStatus({ state: "loading", model: MODEL_ID, progress: loadProgress });
     } else if (progress.status === "done") {
       loadProgress = "Model ready";
     }
@@ -72,26 +108,35 @@ async function loadModel() {
     modelState = "loading";
     loadError = null;
     configureExtensionOrt();
-    await chrome.storage.local.set({
-      localLlmStatus: { state: "loading", model: MODEL_ID, progress: "Loading SmolLM2-360M…" },
-    });
+    reportStatus({ state: "loading", model: MODEL_ID, progress: "Loading SmolLM2-360M…" });
 
     try {
-      generator = await pipeline("text-generation", MODEL_ID, {
-        dtype: "q4",
-        device: "wasm",
-      });
+      const preferred = await pickDevice();
+      const attempts =
+        preferred === "webgpu"
+          ? [[GPU_MODEL_ID, "webgpu", "q4"], [CPU_MODEL_ID, "webgpu", "q4f16"], [CPU_MODEL_ID, "wasm", "q4"]]
+          : [[CPU_MODEL_ID, "wasm", "q4"]];
+      let lastErr = null;
+      for (const [modelId, device, dtype] of attempts) {
+        try {
+          MODEL_ID = modelId;
+          reportStatus({ state: "loading", model: modelId, progress: `Loading ${modelId.split("/")[1]} (${device})…` });
+          generator = await pipeline("text-generation", modelId, { dtype, device });
+          deviceUsed = device;
+          break;
+        } catch (err) {
+          lastErr = err;
+          generator = null;
+        }
+      }
+      if (!generator) throw lastErr || new Error("Model failed to load");
       modelState = "ready";
-      await chrome.storage.local.set({
-        localLlmStatus: { state: "ready", model: MODEL_ID, progress: "" },
-      });
+      reportStatus({ state: "ready", model: MODEL_ID, progress: "", device: deviceUsed });
       return generator;
     } catch (err) {
       modelState = "error";
       loadError = formatError(err);
-      await chrome.storage.local.set({
-        localLlmStatus: { state: "error", model: MODEL_ID, error: loadError },
-      });
+      reportStatus({ state: "error", model: MODEL_ID, error: loadError });
       loadPromise = null;
       throw err;
     }
@@ -100,32 +145,70 @@ async function loadModel() {
   return loadPromise;
 }
 
+/** The pipeline returns a string, an array of messages, or a wrapper, depending on the input form. */
+function extractGenerated(outputs) {
+  const first = Array.isArray(outputs) ? outputs[0] : outputs;
+  const generated = first?.generated_text ?? first;
+  if (typeof generated === "string") return generated;
+  if (Array.isArray(generated)) {
+    const last = generated[generated.length - 1];
+    return typeof last === "string" ? last : last?.content || "";
+  }
+  return typeof generated?.content === "string" ? generated.content : "";
+}
+
 async function generateAnswer({ question, profile, eventTitle, fieldType, qType }) {
   const system = buildSystemPrompt(fieldType);
   const user = buildUserPrompt({ question, profile, eventTitle, fieldType });
-  const prompt = buildChatPrompt(system, user);
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ];
 
   const pipe = await loadModel();
-  const maxNew = fieldType === "textarea" ? 100 : 64;
+  // Short and greedy with a light repetition penalty: one grounded sentence is what a
+  // registration form wants, and sampling is where small models drift into invented topics.
+  const maxNew = fieldType === "textarea" ? 80 : 48;
 
-  const outputs = await pipe(prompt, {
+  const outputs = await pipe(messages, {
     max_new_tokens: maxNew,
-    temperature: 0.35,
-    top_p: 0.9,
-    do_sample: true,
+    do_sample: false,
+    repetition_penalty: 1.12,
+    no_repeat_ngram_size: 3,
     return_full_text: false,
   });
 
-  const raw =
-    outputs?.[0]?.generated_text ??
-    outputs?.generated_text ??
-    (typeof outputs === "string" ? outputs : "");
+  const raw = extractGenerated(outputs);
 
-  let answer = trimAnswer(raw, fieldType);
-  if (!answer) {
-    answer = ruleBasedFallback(profile, qType);
-  }
+  // No stand-in here: an empty or garbled answer is reported as such so the caller can decide.
+  const answer = trimAnswer(raw, fieldType);
+  if (!answer || looksGarbled(answer, question)) return null;
+  // A form answer is written as "I". Output that talks about the attendee by name has drifted
+  // into the third person (and small models then invent titles for that name): discard it.
+  const names = [profile?.first_name, profile?.last_name].map((n) => String(n || "").trim().toLowerCase()).filter((n) => n.length >= 3);
+  const lower = answer.toLowerCase();
+  if (names.some((n) => lower.includes(n))) return null;
   return answer;
+}
+
+/**
+ * A small model on a misbehaving backend can emit token salad ("| | | |", "Probe probe probe",
+ * echoes of the prompt). Such output must never reach a form.
+ */
+function looksGarbled(text, question = "") {
+  const t = String(text || "").trim();
+  if (t.length < 8) return true;
+  const words = t.split(/\s+/);
+  const alphaWords = words.filter((w) => /^[A-Za-z][A-Za-z'’-]*[.,!?;:)]?$/.test(w));
+  if (alphaWords.length / words.length < 0.75) return true;
+  const lower = alphaWords.map((w) => w.toLowerCase().replace(/[^a-z']/g, ""));
+  const unique = new Set(lower);
+  if (lower.length >= 8 && unique.size / lower.length < 0.55) return true;
+  if (/^(question|event|attendee|profile|answer)\s*:/i.test(t)) return true;
+  if (/[|#*_=]{2,}/.test(t)) return true;
+  const firstQ = String(question || "").toLowerCase().slice(0, 40);
+  if (firstQ && t.toLowerCase().startsWith(firstQ)) return true;
+  return false;
 }
 
 /**
@@ -138,20 +221,19 @@ async function chooseOption({ question, options, profile, eventTitle }) {
 
   const system = buildOptionSelectSystemPrompt();
   const user = buildOptionSelectUserPrompt({ question, options, profile, eventTitle });
-  const prompt = buildChatPrompt(system, user);
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ];
 
   const pipe = await loadModel();
-  const outputs = await pipe(prompt, {
+  const outputs = await pipe(messages, {
     max_new_tokens: 8,
-    temperature: 0.1,
     do_sample: false,
     return_full_text: false,
   });
 
-  const raw =
-    outputs?.[0]?.generated_text ??
-    outputs?.generated_text ??
-    (typeof outputs === "string" ? outputs : "");
+  const raw = extractGenerated(outputs);
 
   return parseOptionChoice(raw, options);
 }
@@ -172,7 +254,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       model: MODEL_ID,
       progress: loadProgress,
       error: loadError,
+      device: deviceUsed,
     });
+    return true;
+  }
+
+  if (message.type === "LOCAL_LLM_ENV") {
+    (async () => ({
+      gpu: Boolean(navigator.gpu),
+      adapter: Boolean(navigator.gpu && (await navigator.gpu.requestAdapter().catch(() => null))),
+      threads: navigator.hardwareConcurrency || null,
+      crossOriginIsolated: Boolean(globalThis.crossOriginIsolated),
+      device: deviceUsed,
+    }))().then(sendResponse);
     return true;
   }
 
@@ -187,15 +281,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     generateAnswer(message)
-      .then((answer) => sendResponse({ answer, source: "local", model: MODEL_ID }))
-      .catch((err) => {
-        const fallback = ruleBasedFallback(message.profile, message.qType);
-        if (fallback) {
-          sendResponse({ answer: fallback, source: "rules", error: formatError(err) });
-        } else {
-          sendResponse({ answer: null, error: formatError(err) });
-        }
-      });
+      .then((answer) => sendResponse({ answer, source: answer ? "local" : "none", model: MODEL_ID, device: deviceUsed }))
+      .catch((err) => sendResponse({ answer: null, source: "none", error: formatError(err) }));
     return true;
   }
 });

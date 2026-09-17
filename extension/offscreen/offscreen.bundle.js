@@ -47956,8 +47956,8 @@ var __webpack_exports__zeros_like = __webpack_exports__.zeros_like;
 
 // lib/prompt-utils.js
 function buildSystemPrompt(fieldType) {
-  const lengthHint = fieldType === "textarea" ? "Write 2-3 sentences." : "Write one short sentence (under 120 characters if possible).";
-  return `You fill out Luma event registration forms. ${lengthHint} Answer ONLY the question asked \u2014 do not repeat the question. Be specific, professional, and authentic. Use ONLY the profile facts provided. Do NOT invent URLs, social handles, usernames, phone numbers, employers, dates, or statistics that are not in the profile \u2014 if a detail is unknown, give a brief honest generic answer instead of guessing. For location/city questions use the profile location. For community membership questions, answer honestly and positively. For admission questions, give a concise compelling reason tied to their background. Never mention AI. No quotes around the answer.`;
+  const lengthHint = fieldType === "textarea" ? "Reply with at most two sentences, under 45 words in total." : "Reply with exactly one sentence, under 25 words.";
+  return `You are the attendee, writing one answer on an event registration form, in your own voice. ${lengthHint} Always write as "I" (never refer to the attendee by name or as he/she). Plain prose: no bullet points, no lists, no headings, no quotes, no preamble, and do not repeat or define the question. Answer the question directly: if it asks what you want to discuss, learn or find, say what you want; if it asks what you are working on, say what you work on. Use only the facts in the profile. Do not invent products, research areas, employers, numbers, links or handles; if the profile does not cover the question, answer with what you do at your company and what you want from this event. Never mention being an assistant or a model.`;
 }
 function buildOptionSelectSystemPrompt() {
   return "You help an attendee fill a Luma event registration form. You are given a question and a numbered list of the ONLY allowed answers. Choose the single best option for the attendee based on their profile. Reply with ONLY the number of that option \u2014 no words, no punctuation, no explanation. Never invent an answer that is not in the list.";
@@ -48002,56 +48002,55 @@ function parseOptionChoice(raw, options) {
 function buildUserPrompt({ question, profile, eventTitle, fieldType }) {
   const defaults = profile.default_answers || {};
   const saved = Object.entries(defaults).slice(0, 6).map(([q, a]) => `- ${q}: ${a}`).join("\n");
-  return `Event: ${eventTitle || "SF tech / AI community event"}
-Question: ${question}
-Field type: ${fieldType || "text"}
-
-Profile:
-- Name: ${profile.first_name} ${profile.last_name}
-- Title: ${profile.job_title}
-- Company: ${profile.company}
-- Location: ${profile.location || "San Francisco, CA"}
-- LinkedIn: ${profile.linkedin || "n/a"}
-` + (saved ? `
-Saved answers:
-${saved}` : "");
-}
-function buildChatPrompt(system, user) {
-  return `<|im_start|>system
-${system}
-<|im_start|>user
-${user}
-<|im_start|>assistant
-`;
+  const about = [
+    profile.job_title && profile.company ? `${profile.job_title} at ${profile.company}` : profile.job_title || profile.company,
+    profile.location ? `based in ${profile.location}` : null
+  ].filter(Boolean).join(", ");
+  return `Event: ${eventTitle || "a tech / AI community event"}
+Attendee: ${profile.first_name} ${profile.last_name}, ${about || "attendee"}.
+` + (saved ? `Things the attendee has said before:
+${saved}
+` : "") + `
+Form question: ${question}
+Answer (${fieldType === "textarea" ? "two sentences max" : "one sentence"}):`;
 }
 function trimAnswer(text, fieldType) {
-  let answer = (text || "").trim().replace(/^["']|["']$/g, "").split(/<\|im_end\|>/)[0].split("<|im_start|>")[0].trim();
-  if (fieldType !== "textarea" && answer.length > 280) {
-    const cut = answer.slice(0, 277);
-    const lastSpace = cut.lastIndexOf(" ");
-    answer = (lastSpace > 80 ? cut.slice(0, lastSpace) : cut) + "\u2026";
+  let raw = (text || "").split(/<\|im_end\|>/)[0].split("<|im_start|>")[0].replace(/^\s*(answer|response)\s*:\s*/i, "").trim();
+  if (!raw) return "";
+  const lines = raw.split(/\r?\n/).map((line) => line.replace(/^\s*(?:[-*•]+|\d+[.)])\s*/, "").trim()).filter(Boolean);
+  let joined = lines.join(" ").replace(/\s+/g, " ").replace(/\s+([,.;:!?])/g, "$1").replace(/([,.;:!?])\1+/g, "$1").replace(/^["'“”]+|["'“”]+$/g, "").trim();
+  if (!joined) return "";
+  if (!/^[A-Z0-9"'“(]/.test(joined)) {
+    const firstProper = joined.search(/(?:^|[.!?]\s+)[A-Z]/);
+    joined = firstProper >= 0 ? joined.slice(joined.indexOf(joined.match(/[A-Z]/)[0], firstProper)).trim() : "";
+    if (!joined) return "";
   }
-  return answer;
-}
-function ruleBasedFallback(profile, qType) {
-  const loc = profile.location || "San Francisco, CA";
-  switch (qType) {
-    case "location":
-    case "city":
-      return loc;
-    case "community_member":
-      return "Yes \u2014 I'm active in the San Francisco tech community and excited to participate.";
-    case "admission":
-      return `As a ${profile.job_title} at ${profile.company}, I bring hands-on full-stack and AI experience and would contribute thoughtfully while learning from the community.`;
-    case "motivation":
-      return `I'm a ${profile.job_title} based in ${loc}, interested in AI/tech events where I can learn and meet other developers.`;
-    default:
-      return null;
+  const maxSentences = fieldType === "textarea" ? 2 : 1;
+  const sentences = joined.match(/[^.!?]+[.!?]+(?=\s|$)/g) || [];
+  const seen = /* @__PURE__ */ new Set();
+  const kept = [];
+  for (const s of sentences) {
+    const clean = s.trim();
+    const key = clean.toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    if (!clean || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(clean);
+    if (kept.length >= maxSentences) break;
   }
+  let answer = kept.join(" ");
+  if (!answer) {
+    const limit = fieldType === "textarea" ? 260 : 160;
+    answer = joined.length > limit ? joined.slice(0, limit).replace(/\s+\S*$/, "") : joined;
+  }
+  const cap = fieldType === "textarea" ? 320 : 200;
+  if (answer.length > cap) answer = answer.slice(0, cap).replace(/\s+\S*$/, "").replace(/[,;:]$/, "") + ".";
+  return answer.trim();
 }
 
 // offscreen/offscreen.js
-var MODEL_ID = "onnx-community/SmolLM2-360M-Instruct";
+var GPU_MODEL_ID = "onnx-community/Qwen2.5-0.5B-Instruct";
+var CPU_MODEL_ID = "HuggingFaceTB/SmolLM2-360M-Instruct";
+var MODEL_ID = CPU_MODEL_ID;
 __webpack_exports__env.useBrowserCache = true;
 __webpack_exports__env.allowLocalModels = false;
 var generator = null;
@@ -48059,6 +48058,28 @@ var loadPromise = null;
 var modelState = "idle";
 var loadError = null;
 var loadProgress = "";
+var deviceUsed = null;
+async function pickDevice() {
+  try {
+    if (navigator.gpu && await navigator.gpu.requestAdapter()) return "webgpu";
+  } catch {
+  }
+  return "wasm";
+}
+function reportStatus(status) {
+  try {
+    if (chrome.storage?.local?.set) {
+      Promise.resolve(chrome.storage.local.set({ localLlmStatus: status })).catch(() => {
+      });
+      return;
+    }
+  } catch {
+  }
+  try {
+    chrome.runtime.sendMessage({ type: "LOCAL_LLM_STATUS_UPDATE", status }, () => void chrome.runtime.lastError);
+  } catch {
+  }
+}
 function formatError(err) {
   if (!err) return "Unknown error";
   if (typeof err === "string") return err;
@@ -48085,7 +48106,7 @@ __webpack_exports__env.progressCallback = (progress) => {
       const loaded = progress.loaded ?? 0;
       const pct = Math.round(loaded / progress.total * 100);
       loadProgress = `Downloading model\u2026 ${pct}%`;
-      chrome.storage.local.set({ localLlmStatus: { state: "loading", progress: loadProgress } });
+      reportStatus({ state: "loading", model: MODEL_ID, progress: loadProgress });
     } else if (progress.status === "done") {
       loadProgress = "Model ready";
     }
@@ -48099,64 +48120,101 @@ async function loadModel() {
     modelState = "loading";
     loadError = null;
     configureExtensionOrt();
-    await chrome.storage.local.set({
-      localLlmStatus: { state: "loading", model: MODEL_ID, progress: "Loading SmolLM2-360M\u2026" }
-    });
+    reportStatus({ state: "loading", model: MODEL_ID, progress: "Loading SmolLM2-360M\u2026" });
     try {
-      generator = await __webpack_exports__pipeline("text-generation", MODEL_ID, {
-        dtype: "q4",
-        device: "wasm"
-      });
+      const preferred = await pickDevice();
+      const attempts = preferred === "webgpu" ? [[GPU_MODEL_ID, "webgpu", "q4"], [CPU_MODEL_ID, "webgpu", "q4f16"], [CPU_MODEL_ID, "wasm", "q4"]] : [[CPU_MODEL_ID, "wasm", "q4"]];
+      let lastErr = null;
+      for (const [modelId, device, dtype] of attempts) {
+        try {
+          MODEL_ID = modelId;
+          reportStatus({ state: "loading", model: modelId, progress: `Loading ${modelId.split("/")[1]} (${device})\u2026` });
+          generator = await __webpack_exports__pipeline("text-generation", modelId, { dtype, device });
+          deviceUsed = device;
+          break;
+        } catch (err) {
+          lastErr = err;
+          generator = null;
+        }
+      }
+      if (!generator) throw lastErr || new Error("Model failed to load");
       modelState = "ready";
-      await chrome.storage.local.set({
-        localLlmStatus: { state: "ready", model: MODEL_ID, progress: "" }
-      });
+      reportStatus({ state: "ready", model: MODEL_ID, progress: "", device: deviceUsed });
       return generator;
     } catch (err) {
       modelState = "error";
       loadError = formatError(err);
-      await chrome.storage.local.set({
-        localLlmStatus: { state: "error", model: MODEL_ID, error: loadError }
-      });
+      reportStatus({ state: "error", model: MODEL_ID, error: loadError });
       loadPromise = null;
       throw err;
     }
   })();
   return loadPromise;
 }
+function extractGenerated(outputs) {
+  const first = Array.isArray(outputs) ? outputs[0] : outputs;
+  const generated = first?.generated_text ?? first;
+  if (typeof generated === "string") return generated;
+  if (Array.isArray(generated)) {
+    const last = generated[generated.length - 1];
+    return typeof last === "string" ? last : last?.content || "";
+  }
+  return typeof generated?.content === "string" ? generated.content : "";
+}
 async function generateAnswer({ question, profile, eventTitle, fieldType, qType }) {
   const system = buildSystemPrompt(fieldType);
   const user = buildUserPrompt({ question, profile, eventTitle, fieldType });
-  const prompt = buildChatPrompt(system, user);
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: user }
+  ];
   const pipe = await loadModel();
-  const maxNew = fieldType === "textarea" ? 100 : 64;
-  const outputs = await pipe(prompt, {
+  const maxNew = fieldType === "textarea" ? 80 : 48;
+  const outputs = await pipe(messages, {
     max_new_tokens: maxNew,
-    temperature: 0.35,
-    top_p: 0.9,
-    do_sample: true,
+    do_sample: false,
+    repetition_penalty: 1.12,
+    no_repeat_ngram_size: 3,
     return_full_text: false
   });
-  const raw = outputs?.[0]?.generated_text ?? outputs?.generated_text ?? (typeof outputs === "string" ? outputs : "");
-  let answer = trimAnswer(raw, fieldType);
-  if (!answer) {
-    answer = ruleBasedFallback(profile, qType);
-  }
+  const raw = extractGenerated(outputs);
+  const answer = trimAnswer(raw, fieldType);
+  if (!answer || looksGarbled(answer, question)) return null;
+  const names = [profile?.first_name, profile?.last_name].map((n) => String(n || "").trim().toLowerCase()).filter((n) => n.length >= 3);
+  const lower = answer.toLowerCase();
+  if (names.some((n) => lower.includes(n))) return null;
   return answer;
+}
+function looksGarbled(text, question = "") {
+  const t = String(text || "").trim();
+  if (t.length < 8) return true;
+  const words = t.split(/\s+/);
+  const alphaWords = words.filter((w) => /^[A-Za-z][A-Za-z'’-]*[.,!?;:)]?$/.test(w));
+  if (alphaWords.length / words.length < 0.75) return true;
+  const lower = alphaWords.map((w) => w.toLowerCase().replace(/[^a-z']/g, ""));
+  const unique = new Set(lower);
+  if (lower.length >= 8 && unique.size / lower.length < 0.55) return true;
+  if (/^(question|event|attendee|profile|answer)\s*:/i.test(t)) return true;
+  if (/[|#*_=]{2,}/.test(t)) return true;
+  const firstQ = String(question || "").toLowerCase().slice(0, 40);
+  if (firstQ && t.toLowerCase().startsWith(firstQ)) return true;
+  return false;
 }
 async function chooseOption({ question, options, profile, eventTitle }) {
   if (!Array.isArray(options) || !options.length) return null;
   const system = buildOptionSelectSystemPrompt();
   const user = buildOptionSelectUserPrompt({ question, options, profile, eventTitle });
-  const prompt = buildChatPrompt(system, user);
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: user }
+  ];
   const pipe = await loadModel();
-  const outputs = await pipe(prompt, {
+  const outputs = await pipe(messages, {
     max_new_tokens: 8,
-    temperature: 0.1,
     do_sample: false,
     return_full_text: false
   });
-  const raw = outputs?.[0]?.generated_text ?? outputs?.generated_text ?? (typeof outputs === "string" ? outputs : "");
+  const raw = extractGenerated(outputs);
   return parseOptionChoice(raw, options);
 }
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -48170,8 +48228,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       state: modelState,
       model: MODEL_ID,
       progress: loadProgress,
-      error: loadError
+      error: loadError,
+      device: deviceUsed
     });
+    return true;
+  }
+  if (message.type === "LOCAL_LLM_ENV") {
+    (async () => ({
+      gpu: Boolean(navigator.gpu),
+      adapter: Boolean(navigator.gpu && await navigator.gpu.requestAdapter().catch(() => null)),
+      threads: navigator.hardwareConcurrency || null,
+      crossOriginIsolated: Boolean(globalThis.crossOriginIsolated),
+      device: deviceUsed
+    }))().then(sendResponse);
     return true;
   }
   if (message.type === "LOCAL_LLM_ANSWER") {
@@ -48179,14 +48248,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       chooseOption(message).then((answer) => sendResponse({ answer, source: "local-select", model: MODEL_ID })).catch((err) => sendResponse({ answer: null, error: formatError(err) }));
       return true;
     }
-    generateAnswer(message).then((answer) => sendResponse({ answer, source: "local", model: MODEL_ID })).catch((err) => {
-      const fallback = ruleBasedFallback(message.profile, message.qType);
-      if (fallback) {
-        sendResponse({ answer: fallback, source: "rules", error: formatError(err) });
-      } else {
-        sendResponse({ answer: null, error: formatError(err) });
-      }
-    });
+    generateAnswer(message).then((answer) => sendResponse({ answer, source: answer ? "local" : "none", model: MODEL_ID, device: deviceUsed })).catch((err) => sendResponse({ answer: null, source: "none", error: formatError(err) }));
     return true;
   }
 });

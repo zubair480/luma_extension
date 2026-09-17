@@ -14,7 +14,7 @@ Auto-discovers and registers for free in-person AI/Tech events in the Bay Area o
    email, job title and company are required; the rest is used only when a form asks for it.
 4. Sign in at lu.ma in that Chrome, then **Scan all 4 & get started**.
 
-The first custom-question answer downloads the on-device model (about 200 MB, once). Answers are
+The first custom-question answer downloads the on-device model (about 390 MB, once). Answers are
 generated locally; nothing is sent to a cloud service unless you configure one in the panel.
 
 **Please read before sharing or running:** this tool automates registration on your own Luma
