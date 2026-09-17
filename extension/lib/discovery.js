@@ -74,6 +74,15 @@ export function writeLookupCache(slug, lookup) {
   lookupCacheDirty = true;
 }
 
+/** Drop a cached verdict (the user's RSVP just changed); the next run looks it up afresh. */
+export async function forgetLookup(slug) {
+  await loadLookupCache();
+  if (!lookupCache || !slug || !lookupCache[slug]) return;
+  delete lookupCache[slug];
+  lookupCacheDirty = true;
+  await flushLookupCache();
+}
+
 export async function flushLookupCache() {
   if (!lookupCacheAvailable() || !lookupCacheDirty || !lookupCache) return;
   lookupCacheDirty = false;

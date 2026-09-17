@@ -4,6 +4,7 @@ import {
   isPastEvent,
   lookupRsvpStatus,
   lookupEventQuestions,
+  forgetLookup,
 } from "./lib/discovery.js";
 import { pickPrewarmQuestions } from "./lib/question-prewarm.js";
 import { discoverCerebralValleyViaApi } from "./lib/cv-api-discovery.js";
@@ -1063,6 +1064,18 @@ async function adoptTabIntoPool(tabId) {
   await closeTabsSafely([tabId]);
 }
 
+/** A skip entry for an event the user already has an RSVP on, per Luma's own status. */
+function skipFromRsvpStatus(event, rsvp) {
+  const map = {
+    going: ["already_registered", "Already registered (Luma) — skipped"],
+    pending: ["pending_approval", "Pending approval (Luma) — skipped"],
+    waitlist: ["on_waitlist", "On waitlist (Luma) — skipped"],
+  };
+  if (!rsvp || !map[rsvp]) return null;
+  const [status, message] = map[rsvp];
+  return { event, success: true, skipped: true, status, message, timestamp: new Date().toISOString() };
+}
+
 async function finishAgentTabs(fallbackTabId) {
   await endAgentRun(tabPool.workTabId || fallbackTabId);
   if (tabPool.prefetchTabId) await closeTabsSafely([tabPool.prefetchTabId]);
@@ -1202,6 +1215,10 @@ async function processRun(
         continue;
       }
 
+      // Ask Luma for the current RSVP while the page loads. A cached verdict can be hours old and
+      // an earlier run may have waitlisted or registered this event without confirming it.
+      const liveStatus = lookupRsvpStatus(event.slug).catch(() => null);
+
       // Events can sit in the queue for a while; never open one that has ended meanwhile.
       if (isPastEvent(event)) {
         await recordSkip(event, {
@@ -1267,6 +1284,17 @@ async function processRun(
         await throwIfStoppedAsync();
         await ensureContentScript(tabPool.workTabId);
         await setCursorOnTab(tabPool.workTabId, `Event ${index}: ${event.title}`);
+
+        const live = await liveStatus;
+        const liveSkip = skipFromRsvpStatus(event, live?.userRsvpStatus);
+        if (liveSkip) {
+          await recordSkip(event, liveSkip);
+          await appendHistory(liveSkip);
+          await forgetLookup(event.slug);
+          preload = schedulePreload();
+          continue;
+        }
+
         if (results.length === 0) await waitForLocalModelBeforeFirstForm();
         prewarmAnswersFor(event, currentProfile);
         preload = schedulePreload();
@@ -1297,6 +1325,9 @@ async function processRun(
 
         await appendHistory(entry);
         currentProfile = await getProfile();
+        if (entry.success && ["registered", "pending_approval", "waitlist_joined", "invitation_accepted", "already_registered", "on_waitlist"].includes(entry.status)) {
+          await forgetLookup(event.slug);
+        }
 
         if (entry.status === "rate_limited") {
           await chrome.storage.session.set({ currentRunEvent: null });

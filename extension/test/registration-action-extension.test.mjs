@@ -106,6 +106,38 @@ try {
   assert.equal(rateResult.registration.status, "rate_limited");
   assert.equal(rateResult.registration.success, false);
 
+  // An event page that already shows the user on the waitlist (Luma's wording) is recognised
+  // as an existing state before anything is clicked.
+  const waitPage = await context.newPage();
+  await waitPage.route("https://luma.com/test-waitlisted", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body:
+        "<!doctype html><html><body><main><h1>Claude Meetup</h1><p>Starting in 8d 17h</p>" +
+        "<h2>You’re on the Waitlist</h2><p>We will let you know if you are admitted.</p>" +
+        '<p>If you can no longer join, you can <a href="#">leave the waitlist</a>.</p>' +
+        "<button type=\"button\">Contact the Host</button></main></body></html>",
+    })
+  );
+  await waitPage.goto("https://luma.com/test-waitlisted", { waitUntil: "domcontentloaded" });
+  const waitStatus = await worker.evaluate(async () => {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const [tab] = await chrome.tabs.query({ url: "https://luma.com/test-waitlisted*" });
+      if (tab?.id) {
+        try {
+          const res = await chrome.tabs.sendMessage(tab.id, { type: "CHECK_STATUS" });
+          if (res) return res;
+        } catch {
+          // Content script can still be starting after navigation.
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Waitlist fixture did not respond");
+  });
+  assert.equal(waitStatus.status, "on_waitlist", `Waitlisted page not recognised: ${JSON.stringify(waitStatus)}`);
+
   // Following the host: the button reads "Follow", flips to "Following" once clicked, and is
   // never clicked twice.
   const followPage = await context.newPage();

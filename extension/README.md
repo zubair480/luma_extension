@@ -185,6 +185,15 @@ that asks you to type your name and click **Sign & Accept**. The agent types the
 name and signs. Questions that ask you to type "I agree" or "yes" to acknowledge terms, rules or a
 code of conduct are answered accordingly, and agreement-style dropdowns pick the "I agree" option.
 
+### Never registering twice
+
+Before each event is registered, Luma is asked for your current RSVP on it (the request runs while
+the page loads). Going, pending approval, or waitlisted means the event is skipped and recorded,
+even if a previous run failed to confirm the registration it had actually made or the verification
+cache still said "open". On the page itself, "You're on the Waitlist", "leave the waitlist",
+"pending approval" and "your request has been sent" are recognised as existing states. Every
+confirmed registration, request or waitlist join also drops that event from the verification cache.
+
 ### Confirming a submit
 
 After clicking Register / Request to Join / Join Waitlist, the page is read for a couple of

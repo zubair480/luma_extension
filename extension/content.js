@@ -11,13 +11,19 @@ const EXISTING_CHECKS = [
   },
   {
     status: "on_waitlist",
-    phrases: [],
-    buttons: ["leave waitlist", "cancel waitlist"],
+    phrases: [
+      "you're on the waitlist", "you are on the waitlist", "on the waitlist",
+      "we will let you know if you are admitted", "leave the waitlist",
+    ],
+    buttons: ["leave waitlist", "leave the waitlist", "cancel waitlist"],
     message: "On waitlist — skipped",
   },
   {
     status: "pending_approval",
-    phrases: [],
+    phrases: [
+      "pending approval", "awaiting approval", "your registration is pending",
+      "your request has been sent", "request sent", "subject to host approval",
+    ],
     buttons: ["pending approval", "awaiting approval"],
     message: "Pending approval — skipped",
   },
