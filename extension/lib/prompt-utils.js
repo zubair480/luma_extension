@@ -123,8 +123,10 @@ export function trimAnswer(text, fieldType) {
   return answer;
 }
 
-export function ruleBasedFallback(profile, qType) {
+export function ruleBasedFallback(profile, qType, { eventTitle = "", question = "" } = {}) {
   const loc = profile.location || "San Francisco, CA";
+  const where = profile.company ? `${profile.job_title} at ${profile.company}` : profile.job_title;
+  const event = eventTitle ? `"${eventTitle}"` : "this event";
   switch (qType) {
     case "location":
     case "city":
@@ -137,10 +139,7 @@ export function ruleBasedFallback(profile, qType) {
         "and would contribute thoughtfully while learning from the community."
       );
     case "motivation":
-      return (
-        `I'm a ${profile.job_title} based in ${loc}, interested in AI/tech events ` +
-        "where I can learn and meet other developers."
-      );
+      return `I'm a ${where} in ${loc}. I'm coming to ${event} to learn from the people building in this space and to meet other builders.`;
     case "building":
       return profile.company
         ? `${profile.job_title} at ${profile.company}, building AI products and tooling — happy to share more at the event.`

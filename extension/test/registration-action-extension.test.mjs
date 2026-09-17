@@ -105,7 +105,43 @@ try {
   assert.equal(rateResult.feed.eventLinks.length, 0);
   assert.equal(rateResult.registration.status, "rate_limited");
   assert.equal(rateResult.registration.success, false);
-  console.log("Browser-level registration action and 429 safety checks passed (no click performed)");
+
+  // Following the host: the button reads "Follow", flips to "Following" once clicked, and is
+  // never clicked twice.
+  const followPage = await context.newPage();
+  await followPage.route("https://luma.com/test-follow", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body:
+        "<!doctype html><html><body><main><h1>Follow fixture</h1><p>Presented by Example Calendar</p>" +
+        '<button id="f" type="button"><div class="label">Follow</div></button>' +
+        '<button type="button">Contact the Host</button>' +
+        "<script>document.getElementById('f').addEventListener('click',()=>{document.getElementById('f').firstChild.textContent='Following';window.__followClicks=(window.__followClicks||0)+1;});</script>" +
+        "</main></body></html>",
+    })
+  );
+  await followPage.goto("https://luma.com/test-follow", { waitUntil: "domcontentloaded" });
+  const followResult = await worker.evaluate(async () => {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const [tab] = await chrome.tabs.query({ url: "https://luma.com/test-follow*" });
+      if (tab?.id) {
+        try {
+          const first = await chrome.tabs.sendMessage(tab.id, { type: "FOLLOW_HOST" });
+          const second = await chrome.tabs.sendMessage(tab.id, { type: "FOLLOW_HOST" });
+          if (first) return { first, second };
+        } catch {
+          // Content script can still be starting after navigation.
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Follow fixture did not respond");
+  });
+  assert.equal(followResult.first.followed, true, "Follow button was not followed");
+  assert.equal(followResult.second.alreadyFollowing, true, "Second pass did not recognise the followed state");
+  assert.equal(await followPage.evaluate(() => window.__followClicks), 1, "Follow was clicked more than once");
+  console.log("Browser-level registration action, 429 safety and host-follow checks passed (no registration click performed)");
 } finally {
   await context.close();
   fs.rmSync(userDataDir, { recursive: true, force: true });

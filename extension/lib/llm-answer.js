@@ -253,10 +253,14 @@ export async function answerRegistrationQuestion({
   }
 
   const cached = await getCachedAnswer(question);
-  if (cached) return cached;
+  if (cached) {
+    lastAnswerSource = "cache";
+    return cached;
+  }
 
   const config = await getLlmConfig();
   let answer = null;
+  let modelError = null;
 
   if (config.enabled) {
     const provider = config.provider || "local";
@@ -268,23 +272,36 @@ export async function answerRegistrationQuestion({
       } else if (provider === "openai" && config.openaiApiKey?.trim()) {
         answer = await callOpenAI(question, profile, eventTitle, fieldType, config);
       }
-    } catch {
+    } catch (err) {
+      modelError = err?.message || String(err);
       answer = null;
     }
 
     if (!answer && provider !== "local") {
       try {
         answer = await callLocalModel(question, profile, eventTitle, fieldType, qType);
-      } catch {
-        /* local fallback failed */
+      } catch (err) {
+        modelError = modelError || err?.message || String(err);
       }
     }
   }
 
-  if (!answer) {
-    answer = ruleBasedFallback(profile, qType);
+  if (answer) {
+    lastAnswerSource = "model";
+    await cacheAnswer(question, answer);
+    return answer;
   }
 
-  if (answer) await cacheAnswer(question, answer);
+  // The model did not answer. A rule-based line is a stand-in, not an answer: it is reported as
+  // such so the run can show it (and pause for a required field) instead of passing it off.
+  answer = ruleBasedFallback(profile, qType, { eventTitle, question });
+  lastAnswerSource = answer ? "rules" : "none";
+  lastModelError = modelError;
   return answer;
+}
+
+let lastAnswerSource = "none";
+let lastModelError = null;
+export function getLastAnswerSource() {
+  return { source: lastAnswerSource, error: lastModelError };
 }

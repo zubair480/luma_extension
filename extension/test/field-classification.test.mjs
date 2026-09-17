@@ -100,6 +100,28 @@ assert("'how do you share context with AI' is free text for the AI", fi.classify
 assert("'X (Twitter) handle' returns the @handle", fi.answerForQuestion("What is your X (Twitter) handle?", { ...inviteProfile, twitter_handle: "ada_probe" }) === "@ada_probe");
 assert("founder-flavoured page keeps the real title without an explicit persona", fi.applyEventPersona(inviteProfile, "Founders & investors night", "startup pitch").job_title === "Founding Software Engineer");
 
+console.log("\nStartup Grind form (team size, funding, website, referral, signature)");
+const sgProfile = { ...profile, job_title: "Founding AI Engineer", company: "Andever AI (Stealth)", website: "https://andever.ai", default_answers: { "How many people work in your company?": "Andever AI (Stealth)", "Company Website": "Andever AI (Stealth)" } };
+assert("'How many people work in your company?' is team size, not company", fi.classifyQuestion("How many people work in your company?") === "team_size");
+assert("team size never answers with the company name, even with a bad saved answer", fi.answerForQuestion("How many people work in your company?", sgProfile) === "1-10");
+assert("'Number of employees at your company?' is team size", fi.classifyQuestion("Number of employees at your company?") === "team_size");
+assert("'How much has your company raised to date (USD)?' is funding amount", fi.classifyQuestion("How much has your company raised to date (USD)?") === "funding_amount");
+assert("funding amount answers conservatively", fi.answerForQuestion("How much has your company raised to date (USD)?", sgProfile) === "Prefer not to disclose");
+assert("'Company Website' is the website, not the company name", fi.answerForQuestion("Company Website", sgProfile) === "https://andever.ai");
+assert("'Company Name' is still the company", fi.answerForQuestion("Company Name", sgProfile) === "Andever AI (Stealth)");
+assert("'How did you hear about this new AI Demo Series?' answers Luma", fi.answerForQuestion("How did you hear about this new AI Demo Series?", sgProfile) === "Luma");
+assert("'What is your role? (If Student, write Student)' is the job title", fi.answerForQuestion("What is your role? (If Student, write Student)", sgProfile) === "Founding AI Engineer");
+assert("'Type \"I agree\" to confirm' answers I agree", fi.answerForQuestion('Type "I agree" to confirm you have read the code of conduct', sgProfile) === "I agree");
+assert("'Do you agree to the event terms?' answers I agree", fi.answerForQuestion("Do you agree to the event terms?", sgProfile) === "I agree");
+assert("'Type yes to acknowledge the rules' answers Yes", fi.answerForQuestion("Type yes to acknowledge the rules", sgProfile) === "Yes");
+
+console.log("\nClaude Code meetup form");
+assert("'features you are most interested in discussing' is a free-text question for the AI, not motivation", fi.classifyQuestion("What Claude Code features or capabilities are you most interested in discussing at this meetup?") === "custom");
+assert("'What brings you to this event?' is still motivation", fi.classifyQuestion("What brings you to this event?") === "motivation");
+assert("'Why are you interested in attending?' is motivation", fi.classifyQuestion("Why are you interested in attending?") === "motivation");
+assert("'How did you find out about this event?' answers Luma", fi.answerForQuestion("How did you find out about this event?", sgProfile) === "Luma");
+assert("'Where do you work or study?' is the company", fi.answerForQuestion("Where do you work or study?", sgProfile) === "Andever AI (Stealth)");
+
 console.log("\nLabel cleaning");
 assert("zero-width spaces are stripped", fi.cleanLabel("Email​ *") === "Email");
 assert("word joiner and BOM are stripped", fi.cleanLabel("﻿Name⁠") === "Name");

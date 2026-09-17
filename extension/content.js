@@ -893,7 +893,7 @@ async function fillFieldsByLabelScan(profile, newAnswers) {
 
     await setNativeValueVisual(input, value, text);
     filled++;
-    newAnswers.push({ question: text, answer: value, fromLlm });
+    if (fromLlm) newAnswers.push({ question: text, answer: value, fromLlm });
   }
 
   return filled;
@@ -949,6 +949,35 @@ async function fillForm(profile) {
   return { filled, newAnswers };
 }
 
+/**
+ * Luma can ask for a typed signature after the terms checkbox: "Type in your name to confirm you
+ * agree to the event terms" with a Sign & Accept button. Type the profile's full name and sign.
+ */
+async function signEventTermsIfAsked(profile, log = () => {}) {
+  const dialog = findTermsSignatureDialog();
+  if (!dialog) return false;
+  const input = [...dialog.querySelectorAll("input")].find(isVisible);
+  const name = `${profile?.first_name || ""} ${profile?.last_name || ""}`.trim();
+  if (!input || !name) {
+    log("fill", "Terms signature requested but no name in profile — leaving it for you", "warn");
+    return false;
+  }
+  if (!(input.value || "").trim()) {
+    await setNativeValueVisual(input, name, "Signing event terms");
+  }
+  const button = [...dialog.querySelectorAll("button, [role='button']")].find(
+    (b) => isVisible(b) && /sign|accept|agree|confirm/i.test(b.textContent) && !/cancel|close|decline|back/i.test(b.textContent)
+  );
+  if (!button) {
+    log("fill", "Terms signature typed but no Sign & Accept button found", "warn");
+    return false;
+  }
+  await agentClick(button, "Signing & accepting terms…", log, "fill", { checkFormScope: false, quick: true });
+  await runAwareSleep(700);
+  log("fill", `Signed the event terms as ${name}`, "success");
+  return true;
+}
+
 async function fillConsentCheckboxes(log = () => {}) {
   const root = getFormRoot();
   if (!root) return 0;
@@ -1002,9 +1031,12 @@ async function fillAllFields(profile, log = () => {}, eventTitle = "") {
     log("fill", `Form agent filled ${agentResult.filled} field(s)`, "info");
   }
 
+  await signEventTermsIfAsked(profile, log);
+
   // Legacy pass for anything the scanner missed
   for (let pass = 0; pass < 2; pass++) {
     await fillConsentCheckboxes(log);
+    await signEventTermsIfAsked(profile, log);
     const batch = await fillForm(profile);
     mergeNewAnswers(saved, batch.newAnswers);
     await fillFieldsByLabelScan(profile, saved);
@@ -1205,6 +1237,7 @@ async function prepareRegistrationForm(profile, savedAnswers, log, expectedEvent
 
 async function registerOnPage(profile, keepCursor = false, eventMeta = {}) {
   resetAbortFlag();
+  window.__lumaAgentPauseRequested = false;
   let runPhase = "init";
   const savedAnswers = [];
 
@@ -1387,10 +1420,16 @@ async function registerOnPage(profile, keepCursor = false, eventMeta = {}) {
       return paidBeforeSubmit;
     }
 
+    await signEventTermsIfAsked(profile, log);
     log("submit", "Submitting registration…");
     await guardEventPage(expectedEventUrl, log, "submit");
     const submitted = await clickSubmit(mode, log);
     await guardEventPage(expectedEventUrl, log, "submit");
+    // Some hosts show the signature dialog only when you submit.
+    if (await signEventTermsIfAsked(profile, log)) {
+      await runAwareSleep(400);
+      if (!isNewRegistrationSuccess(mode) && isRegistrationFormOpen()) await clickSubmit(mode, log);
+    }
     if (!submitted) {
       log("submit", "Submit not available — dropdown may still be open", "warn");
       await runAwareSleep(800);
@@ -1468,6 +1507,44 @@ async function registerOnPage(profile, keepCursor = false, eventMeta = {}) {
   }
 }
 
+const FOLLOW_DONE_RE = /^(following|subscribed|followed)$/i;
+
+function visibleFollowControls(pattern) {
+  return [...document.querySelectorAll("button, [role='button']")].filter(
+    (el) => isVisible(el) && pattern.test(cleanLabel(el.textContent)) && !isUnsafeClickTarget(el, { checkFormScope: false })
+  );
+}
+
+/**
+ * Follow the calendar presenting this event so its future events reach the user's Luma feed and
+ * email digest. Luma renders a "Follow" button beside "Presented by <calendar>"; once followed it
+ * reads "Following". Runs after registration on every event page the agent opens.
+ */
+async function followEventCalendar(log = () => {}) {
+  if (visibleFollowControls(FOLLOW_DONE_RE).length) {
+    log("follow", "Already following this host", "info");
+    return { followed: false, alreadyFollowing: true };
+  }
+  const button = visibleFollowControls(/^follow$/i)[0];
+  if (!button) {
+    log("follow", "No Follow button on this page", "info");
+    return { followed: false };
+  }
+  const clicked = await agentClick(button, "Following host…", log, "follow", { checkFormScope: false, quick: true });
+  if (!clicked) return { followed: false };
+  await runAwareSleep(700);
+
+  if (isLoginRequired()) {
+    log("follow", "Follow needs a signed-in session — skipped", "warn");
+    return { followed: false };
+  }
+  const done = visibleFollowControls(FOLLOW_DONE_RE).length > 0 || visibleFollowControls(/^follow$/i).length === 0;
+  log("follow", done ? "Now following this host's calendar" : "Follow click did not take", done ? "success" : "warn");
+  return { followed: done };
+}
+
+const NO_FOLLOW_STATUSES = new Set(["aborted", "rate_limited", "login_required", "navigated_away", "skipped_non_event"]);
+
 if (window.__lumaAgentLoaded) {
   /* already active */
 } else {
@@ -1484,6 +1561,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     resetAbortFlag();
     if (typeof setCursorMotion === "function") setCursorMotion(!message.fastMode);
     registerOnPage(message.profile, Boolean(message.keepCursor), message.event || {})
+      .then(async (result) => {
+        if (message.followHosts === false || !result || NO_FOLLOW_STATUSES.has(result.status)) return result;
+        try {
+          const follow = await followEventCalendar((step, text, level = "info") =>
+            sendRunLog(step, text, level, { eventSlug: message.event?.slug, eventTitle: message.event?.title })
+          );
+          return { ...result, ...follow };
+        } catch (err) {
+          if (err instanceof RunAbortedError) return abortedResult();
+          return result;
+        }
+      })
       .then((result) => sendResponse(result))
       .catch((err) =>
         sendResponse(
@@ -1509,6 +1598,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === "PING") {
     sendResponse({ ok: true });
+    return true;
+  }
+  if (message.type === "FOLLOW_HOST") {
+    resetAbortFlag();
+    followEventCalendar((step, text, level = "info") => sendRunLog(step, text, level))
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ followed: false, error: err.message }));
     return true;
   }
   if (message.type === "CHECK_STATUS") {

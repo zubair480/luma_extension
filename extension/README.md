@@ -178,6 +178,38 @@ The extension will:
 - Auto-fill your profile and submit registration
 - Show live progress in the popup
 
+### Terms signatures and agreement questions
+
+Some hosts require a typed signature: after the terms checkbox, Luma opens an "Accept Terms" dialog
+that asks you to type your name and click **Sign & Accept**. The agent types the profile's full
+name and signs. Questions that ask you to type "I agree" or "yes" to acknowledge terms, rules or a
+code of conduct are answered accordingly, and agreement-style dropdowns pick the "I agree" option.
+
+### When the model cannot answer
+
+Free-text answers come from the on-device model. If it is not ready (first-ever use downloads it)
+the run waits up to three minutes before the first form. If it still cannot answer, the log says so
+per question: a generic stand-in is used only for optional prompts, and for a **required** one the
+run pauses with the question named in the status bar so you can type the answer in the tab and
+press Resume. Stand-ins are never saved as remembered answers.
+
+### What gets remembered
+
+Only answers the model generated for free-text prompts, and choices made in dropdowns, are saved
+under the question for reuse. Values copied from the profile (name, company, title, links) are
+never saved under a question label, and a saved answer that equals the company name or title is
+ignored for any question that is not about the company or title. A previous version saved every
+filled value, which meant one misclassification (for example the company name under "How many
+people work in your company?") was replayed on every later form; the migration on reload removes
+such entries.
+
+## Following hosts
+
+On every event page it opens, after the registration step, the agent clicks the **Follow** button
+beside "Presented by …" so that calendar's future events show up in your Luma feed and email
+digest. It recognises a calendar you already follow and never clicks twice. Results show
+"· followed host" when it did. Turn it off with **Follow event hosts** in the launch panel.
+
 ## Your profile
 
 Empty on first install. The panel refuses to start a run until first name, last name, email, job

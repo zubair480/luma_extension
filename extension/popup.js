@@ -409,7 +409,7 @@ function renderState(state) {
     }
     const status = document.createElement("span");
     status.className = statusClass(r);
-    status.textContent = statusLabel(r);
+    status.textContent = statusLabel(r) + (r.followed ? " · followed host" : "");
     li.appendChild(title);
     li.appendChild(status);
     resultsList.appendChild(li);
@@ -583,15 +583,25 @@ function getLlmConfigFromForm() {
 }
 
 const fastModeToggle = document.getElementById("fastModeToggle");
+const followHostsToggle = document.getElementById("followHostsToggle");
 
 async function loadAgentSettings() {
   try {
     const { agentSettings = {} } = await chrome.storage.local.get("agentSettings");
     fastModeToggle.checked = Boolean(agentSettings.fastMode);
+    followHostsToggle.checked = agentSettings.followHosts !== false;
   } catch {
     /* storage unavailable */
   }
 }
+
+followHostsToggle.addEventListener("change", async () => {
+  const { agentSettings = {} } = await chrome.storage.local.get("agentSettings");
+  await chrome.storage.local.set({
+    agentSettings: { ...agentSettings, followHosts: followHostsToggle.checked },
+  });
+  showControlToast(followHostsToggle.checked ? "Following hosts on — applies from the next event" : "Following hosts off");
+});
 
 fastModeToggle.addEventListener("change", async () => {
   const { agentSettings = {} } = await chrome.storage.local.get("agentSettings");

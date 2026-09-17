@@ -323,7 +323,16 @@ function classifyQuestionRaw(l) {
   if (/role and company|role & company|current role and company|title and company|company and (role|title)/.test(l)) {
     return "role_company";
   }
-  if (/current role|role or title|title or role|title\s*\/\s*role|role\s*\/\s*title|current title|current position/.test(l)) {
+  if (/how many (people|employees|folks|engineers|team members|staff)|number of employees|team size|company size|headcount|size of (your |the )?(team|company|startup)|employees (at|in) your company|people (work|working) (at|in) your company/.test(l)) {
+    return "team_size";
+  }
+  if (/how much .*(raised|funding|capital)|raised to date|total (funding|raised|capital)|amount raised|funding raised|capital raised|funding to date/.test(l)) {
+    return "funding_amount";
+  }
+  if (/type (["'“”]?)i agree|write (["'“”]?)i agree|say (["'“”]?)i agree|type (["'“”]?)(yes|agree|accept)|confirm (that )?you (agree|accept|have read)|acknowledge (the |these |our )?(terms|rules|code of conduct|policy|waiver)|do you agree|i have read and agree/.test(l)) {
+    return "agreement";
+  }
+  if (/current role|role or title|title or role|title\s*\/\s*role|role\s*\/\s*title|current title|current position|what('s| is) your role|your role\??$/.test(l)) {
     return "job_title";
   }
   if (/kind of role|role best describes|what role|best describes you|describes you best|describe your role/.test(l)) {
@@ -349,7 +358,13 @@ function classifyQuestionRaw(l) {
   if (/linkedin/.test(l)) return "linkedin";
   if (/github/.test(l)) return "github";
   if (/twitter|x\/twitter|x handle|x profile|x \(formerly/.test(l)) return "twitter";
-  if (/company|organization|employer|school|university|institution/.test(l) && !/role|title|kind|website|\burl\b|link|portfolio/.test(l)) {
+  if (/where do you (currently )?work|work or study|study or work|who do you work for|current employer|where are you working|where do you work/.test(l)) {
+    return "company";
+  }
+  if (
+    /company|organization|employer|school|university|institution/.test(l) &&
+    !/role|title|kind|website|\burl\b|link|portfolio|how many|how much|size|raised|revenue|employees|headcount|stage/.test(l)
+  ) {
     return "company";
   }
   if (/job title|^title$|your title|position at/.test(l) && !/kind of role|best describes/.test(l)) {
@@ -379,7 +394,7 @@ function classifyQuestionRaw(l) {
   if (/fundrais|funding round|funding stage|\bfunding\b|raising (a )?(round|money|capital)|currently raising|are you raising|seeking investment|series [a-e]\b|pre-?seed|\bseed round\b/.test(l)) {
     return "fundraising";
   }
-  if (/\bwhy\b|what brings|tell us about|about yourself|\binterest|motivation|what do you hope|hoping to|hope to (find|get|meet|learn)|looking to (find|get|meet|learn)|what are you looking for/.test(l)) {
+  if (/\bwhy\b|what brings|tell us about|about yourself|interested in (attending|coming|joining)|what interests you (about|in) (this|the)|motivation|what do you hope|hoping to|hope to (find|get|meet|learn)|looking to (find|get|meet|learn)|what are you looking for/.test(l)) {
     return "motivation";
   }
   return "custom";
@@ -496,11 +511,30 @@ function answerForQuestion(label, profile, forcedType = null) {
   // Match a saved answer to the form label, but require a substantial overlap so short labels
   // (e.g. "title", "book") don't accidentally match a long saved question key as a substring.
   const lClean = label.toLowerCase().replace(/\*/g, "").trim();
+  // Which identity value each profile field holds, so a remembered answer that is really the
+  // company name (or title, email, link) is only honoured for a question about that same thing.
+  const identityTypes = new Map();
+  const addIdentity = (value, ...types) => {
+    const key = String(value || "").trim().toLowerCase();
+    if (!key) return;
+    if (!identityTypes.has(key)) identityTypes.set(key, new Set());
+    for (const t of types) identityTypes.get(key).add(t);
+  };
+  addIdentity(profile.company, "company", "role_company");
+  addIdentity(profile.job_title, "job_title", "role_company");
+  addIdentity(profile.email, "email", "work_email");
+  addIdentity(profile.work_email, "email", "work_email");
+  addIdentity(profile.phone, "phone");
+  addIdentity(profile.linkedin, "linkedin");
+  addIdentity(profile.github, "github", "website");
+  addIdentity(profile.website, "website");
   let bestSaved = null;
   let bestScore = 0;
   for (const [question, answer] of Object.entries(defaults)) {
     const q = question.toLowerCase().replace(/\*/g, "").trim();
     if (!q || !answer) continue;
+    const identityOf = identityTypes.get(String(answer).trim().toLowerCase());
+    if (identityOf && !identityOf.has(type)) continue; // a past misclassification being replayed
     if (lClean === q) return answer;
     // Substring matches are only trusted when the saved key is a whole question, not a bare
     // word such as "company" that would also match "company website".
@@ -594,7 +628,13 @@ function answerForQuestion(label, profile, forcedType = null) {
     case "motivation":
       return defaults["What brings you to this event?"] || null;
     case "referral":
-      return null;
+      return defaults["How did you hear about the event?"] || defaults.referral || "Luma";
+    case "team_size":
+      return defaults.team_size || profile.team_size || "1-10";
+    case "funding_amount":
+      return defaults.funding_amount || profile.funding_raised || "Prefer not to disclose";
+    case "agreement":
+      return /type (["'“”]?)yes|\byes\b/.test(lClean) && !/i agree/.test(lClean) ? "Yes" : "I agree";
     default:
       return null;
   }
@@ -902,6 +942,15 @@ function selectionPrefsFor(label, profile = null) {
   if (/willing|pitch/.test(l)) {
     return ["no", "not", "decline", "maybe later"];
   }
+  if (/how many|number of employees|team size|company size|headcount|size of/.test(l)) {
+    return ["1-10", "1 - 10", "2-10", "1-5", "<10", "under 10", "fewer than 10", "less than 10", "1-50", "small", "solo", "just me", "1"];
+  }
+  if (/raised|funding|capital|revenue|stage/.test(l)) {
+    return ["prefer not", "not disclosed", "undisclosed", "bootstrapped", "pre-seed", "pre seed", "$0", "none", "not raised", "haven't raised", "less than", "under", "<", "0"];
+  }
+  if (/agree|consent|accept|acknowledge|terms|code of conduct|waiver|policy/.test(l)) {
+    return ["i agree", "agree", "yes", "accept", "i accept", "confirm", "i acknowledge"];
+  }
   if (/fundrais|raising|funding/.test(l)) {
     return ["not raising", "not currently", "not fundrais", "n/a", "not", "no"];
   }
@@ -1076,8 +1125,10 @@ function simulatePointerClick(el) {
   // menus treat a synthetic mousedown as an outside press and drop the selection (verified live).
   el.dispatchEvent(new PointerEvent("pointerdown", pointer));
   el.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 }));
-  el.dispatchEvent(new MouseEvent("click", { ...base, buttons: 0 }));
+  // Exactly one click. Dispatching a click event and then calling el.click() delivered two, which
+  // toggles anything that toggles (Follow → Following → Follow).
   if (typeof el.click === "function") el.click();
+  else el.dispatchEvent(new MouseEvent("click", { ...base, buttons: 0 }));
 }
 
 function snapshotInteractiveTexts(doc = document) {
@@ -1414,6 +1465,27 @@ function getQuestionTextForElement(el, doc = document) {
 
 const FORM_CONTROL_SEL = "input:not([type='hidden']), textarea, select, [role='combobox']";
 
+/** Luma's "Accept Terms" dialog: type your name to confirm you agree, then Sign & Accept. */
+function isTermsSignatureDialog(el) {
+  if (!el) return false;
+  const text = (el.innerText || el.textContent || "").toLowerCase();
+  return /type in your name|sign & accept|sign and accept|type your (full )?name to (confirm|agree|sign)/.test(text);
+}
+
+function findTermsSignatureDialog(doc = document) {
+  for (const el of doc.querySelectorAll('[role="dialog"], [class*="modal" i], [class*="overlay" i], [class*="popup" i]')) {
+    if (!isVisible(el) || isPageRoot(el, doc)) continue;
+    if (!isTermsSignatureDialog(el)) continue;
+    if (![...el.querySelectorAll("input")].some(isVisible)) continue;
+    // Innermost matching container.
+    const inner = [...el.querySelectorAll('[role="dialog"], [class*="modal" i]')].find(
+      (c) => isVisible(c) && isTermsSignatureDialog(c) && [...c.querySelectorAll("input")].some(isVisible)
+    );
+    return inner || el;
+  }
+  return null;
+}
+
 function isPageRoot(el, doc = document) {
   return !el || el === doc.documentElement || el === doc.body;
 }
@@ -1429,7 +1501,9 @@ function hasVisibleFormControl(el) {
  * never returned: with no overlay the <form> itself is the container, otherwise null.
  */
 function getRegistrationModalRoot(doc = document) {
-  const dialogs = [...doc.querySelectorAll('[role="dialog"]')].filter((d) => isVisible(d) && !isPageRoot(d, doc));
+  const dialogs = [...doc.querySelectorAll('[role="dialog"]')].filter(
+    (d) => isVisible(d) && !isPageRoot(d, doc) && !isTermsSignatureDialog(d)
+  );
   if (dialogs.length) {
     const withForm = dialogs.find(
       (d) =>

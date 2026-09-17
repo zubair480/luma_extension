@@ -9,6 +9,7 @@ import {
   warmupLocalModel,
   getLocalModelStatus,
   getLlmConfig,
+  getLastAnswerSource,
 } from "./lib/llm-answer.js";
 import {
   buildHistoryExcludeIds,
@@ -312,9 +313,26 @@ async function mergeProfileAnswers(newAnswers) {
   const current = await getProfile();
   const defaults = { ...(current.default_answers || {}) };
   let changed = false;
+  const identityValues = new Set(
+    [
+      current.company,
+      current.job_title,
+      current.email,
+      current.work_email,
+      current.phone,
+      current.linkedin,
+      current.github,
+      current.website,
+      `${current.first_name || ""} ${current.last_name || ""}`.trim(),
+    ]
+      .filter(Boolean)
+      .map((v) => String(v).trim().toLowerCase())
+  );
 
   for (const { question, answer } of newAnswers) {
     if (!question || !answer) continue;
+    // A profile value under a question label is a misclassification waiting to be replayed.
+    if (identityValues.has(String(answer).trim().toLowerCase())) continue;
     const exists = Object.keys(defaults).some(
       (k) => k.toLowerCase() === question.toLowerCase()
     );
@@ -500,6 +518,7 @@ async function registerInTab(tabId, profile, event = {}) {
         profile,
         keepCursor: Boolean(agentCursorActive),
         fastMode: Boolean(agentSettings.fastMode),
+        followHosts: agentSettings.followHosts !== false,
         event: {
           title: event.title,
           slug: event.slug,
@@ -577,6 +596,35 @@ function warmLocalModelForRun() {
     }
   })();
   return localWarmupInFlight;
+}
+
+/**
+ * Before the first form of a run, give the on-device model up to three minutes to finish its
+ * cold start (first-ever use downloads it). Answering with the rule-based stand-ins instead
+ * would put generic lines into free-text questions.
+ */
+async function waitForLocalModelBeforeFirstForm() {
+  try {
+    const config = await getLlmConfig();
+    if (!config.enabled || (config.provider || "local") !== "local") return;
+    const status = await getLocalModelStatus();
+    if (status?.state === "ready") return;
+    await logRunStep(RUN_STEPS.FILL, "Waiting for the on-device AI to finish loading before the first form…", "info");
+    const started = Date.now();
+    const result = await Promise.race([warmLocalModelForRun(), interruptibleSleep(180000).then(() => null)]);
+    const seconds = Math.round((Date.now() - started) / 1000);
+    if (result?.ok) {
+      await logRunStep(RUN_STEPS.FILL, `On-device AI ready after ${seconds}s`, "info");
+    } else {
+      await logRunStep(
+        RUN_STEPS.FILL,
+        `On-device AI still not ready after ${seconds}s — free-text answers will use stand-ins; the run pauses on required ones so you can fill them`,
+        "warn"
+      );
+    }
+  } catch {
+    /* never block the run on this */
+  }
 }
 
 async function openSidePanel(windowId) {
@@ -1134,6 +1182,7 @@ async function processRun(
         await throwIfStoppedAsync();
         await ensureContentScript(tabPool.workTabId);
         await setCursorOnTab(tabPool.workTabId, `Event ${index}: ${event.title}`);
+        if (results.length === 0) await waitForLocalModelBeforeFirstForm();
         preload = schedulePreload();
         const result = await registerInTab(tabPool.workTabId, currentProfile, event);
 
@@ -2219,8 +2268,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       qType: message.qType,
       options: message.options,
     })
-      .then((answer) => sendResponse({ answer }))
-      .catch((err) => sendResponse({ answer: null, error: err.message }));
+      .then((answer) => sendResponse({ answer, ...getLastAnswerSource() }))
+      .catch((err) => sendResponse({ answer: null, source: "none", error: err.message }));
+    return true;
+  }
+
+  if (message.type === "REQUEST_PAUSE") {
+    // The content script asks for a pause when a required free-text question has no answer
+    // (model unavailable). The user fills it in the tab and presses Resume.
+    (async () => {
+      const active = await isRunActiveFromStorage();
+      if (!active || runControl.paused) return { ok: false };
+      await logRunStep(
+        RUN_STEPS.FILL,
+        message.reason || "Paused: a required question needs your answer. Fill it in the tab, then press Resume.",
+        "warn"
+      );
+      return pauseRun();
+    })()
+      .then((res) => sendResponse(res || { ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 
@@ -2391,6 +2458,16 @@ async function migrateLegacyProfile() {
         next.default_answers[question] = answer;
         changed = true;
       }
+    }
+    // Drop remembered answers that are really the company name or title stored under a question
+    // about something else (team size, website, funding …); they were misclassifications.
+    const identity = new Set([next.company, next.job_title].filter(Boolean).map((v) => String(v).trim().toLowerCase()));
+    for (const [question, answer] of Object.entries(next.default_answers)) {
+      if (!identity.has(String(answer ?? "").trim().toLowerCase())) continue;
+      if (/^(company|organization|company \/ organization|job title|title|role|employer)\b/i.test(question.trim())) continue;
+      if (/company or organization|company\/school|company\/organi[sz]ation|currently (work|at)|what company/i.test(question) && !/website|url|link|how many|how much|size|raised/i.test(question)) continue;
+      delete next.default_answers[question];
+      changed = true;
     }
     if (changed) await chrome.storage.local.set({ profile: next });
   } catch {

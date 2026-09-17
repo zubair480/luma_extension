@@ -3,6 +3,9 @@
  * and fills fields uniformly. Inspired by FormPilot's scan-then-fill pipeline.
  */
 
+/** Where the last answer for each question came from: model, cache, rules (stand-in) or none. */
+const answerSources = new Map();
+
 async function requestFieldAnswer(question, profile, eventTitle, fieldType, qType) {
   const response = await sendMessageWithAbort({
     type: "ANSWER_QUESTION",
@@ -12,7 +15,16 @@ async function requestFieldAnswer(question, profile, eventTitle, fieldType, qTyp
     fieldType,
     qType,
   });
+  answerSources.set(question, { source: response?.source || (response?.answer ? "model" : "none"), error: response?.error || null });
   return response?.answer || null;
+}
+
+function isRequiredField(field) {
+  const el = field?.el;
+  if (!el) return false;
+  if (el.required || el.getAttribute?.("aria-required") === "true") return true;
+  const raw = (el.closest?.("label")?.textContent || "") + (el.parentElement?.previousElementSibling?.textContent || "");
+  return /\*/.test(raw);
 }
 
 /** Ask the model to choose one option (by number) from a fixed list. Returns the chosen text or null. */
@@ -317,6 +329,17 @@ async function fillTextFieldAgent(field, profile, eventTitle, log) {
   if (!value && !attrType && field.answerPromise) {
     setAgentStatus(`Waiting for AI: ${trimStatus(label, 40)}`);
     value = await field.answerPromise;
+    const provenance = answerSources.get(label);
+    if (provenance && provenance.source !== "model" && provenance.source !== "cache") {
+      log(
+        "fill",
+        value
+          ? `AI unavailable — used a generic stand-in for "${trimStatus(label, 40)}"${provenance.error ? ` (${provenance.error})` : ""}`
+          : `AI unavailable — no answer for "${trimStatus(label, 40)}"${provenance.error ? ` (${provenance.error})` : ""}`,
+        "warn"
+      );
+      field.standIn = Boolean(value);
+    }
   }
 
   if (!value && !attrType && !field.answerPromise && (needsSmartAnswer(qType, label) || qType === "custom")) {
@@ -343,7 +366,12 @@ async function fillTextFieldAgent(field, profile, eventTitle, log) {
   }
 
   await setNativeValueVisual(field.el, value, label);
-  return { question: label, answer: value, fromLlm: !attrType && qType === "custom" };
+  const fromLlm = !attrType && qType === "custom";
+  // Only answers that were generated (model) or chosen for a free-text prompt are worth
+  // remembering. Values copied from the profile must not be saved under the question's label:
+  // one misclassification would otherwise be replayed on every later form.
+  const persist = fromLlm || ["motivation", "admission", "community_member", "building", "custom"].includes(qType);
+  return { question: label, answer: value, fromLlm, persist };
 }
 
 async function fillSelectFieldAgent(field, profile, eventTitle, log) {
@@ -500,7 +528,7 @@ async function runFormAgent(profile, eventTitle, log = () => {}) {
       field.answerPromise = answerJobs.get(field.fid) || null;
       const result = await fillOneFieldAgent(field, profile, eventTitle, log);
       if (result) {
-        answers.push(result);
+        if (result.persist !== false) answers.push(result);
         filledCount += 1;
       } else if (field.kind === "multi-select" && multiSelectHasSelection(field.el)) {
         log("fill", `Multi-select satisfied: ${trimStatus(field.label, 40)}`, "info");
@@ -514,5 +542,32 @@ async function runFormAgent(profile, eventTitle, log = () => {}) {
 
   await fillConsentCheckboxes(log);
   clearHighlight();
+
+  // Required free-text questions the model could not answer: hand them to the user instead of
+  // submitting a generic line or an empty box.
+  const needsHuman = scanRegistrationFields().filter(
+    (f) =>
+      (f.kind === "text" || f.kind === "textarea") &&
+      !fieldHasValue(f.el, f.kind) &&
+      isRequiredField(f) &&
+      answerSources.get(f.label) &&
+      answerSources.get(f.label).source !== "model" &&
+      answerSources.get(f.label).source !== "cache"
+  );
+  if (needsHuman.length && !window.__lumaAgentPauseRequested) {
+    window.__lumaAgentPauseRequested = true;
+    const labels = needsHuman.map((f) => trimStatus(f.label, 60)).join(" · ");
+    setAgentStatus(`Needs you: ${trimStatus(labels, 90)} — fill it, then press Resume`);
+    log("fill", `Pausing — the AI could not answer required question(s): ${labels}`, "warn");
+    try {
+      await sendMessageWithAbort({
+        type: "REQUEST_PAUSE",
+        reason: `Paused on "${needsHuman[0].label.slice(0, 80)}" — the AI could not answer it. Type your answer in the tab, then press Resume.`,
+      });
+      await runAwareSleep(300);
+    } catch (err) {
+      if (err instanceof RunAbortedError) throw err;
+    }
+  }
   return { filled: filledCount, newAnswers: answers };
 }
