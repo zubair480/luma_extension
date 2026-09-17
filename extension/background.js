@@ -2344,11 +2344,11 @@ const LEGACY_IDENTITY = {
   answers: {
     "Company / Organization": "Andever AI (Stealth)",
     "What company/school are you currently at?": "Andever AI (Stealth)",
-    "Job Title": "Founding Software Engineer",
+    "Job Title": "Founding AI Engineer",
     "What brings you to this event?":
-      "I'm a Founding Software Engineer at Andever AI (Stealth), interested in AI and tech community events in San Francisco.",
+      "I'm a Founding AI Engineer at Andever AI (Stealth), interested in AI and tech community events in San Francisco.",
     "Tell us about yourself":
-      "Founding Software Engineer at Andever AI (Stealth). I build full-stack and AI-agent products and follow agent developments closely.",
+      "Founding AI Engineer at Andever AI (Stealth). I build full-stack and AI-agent products and follow agent developments closely.",
   },
 };
 
@@ -2362,6 +2362,14 @@ async function migrateLegacyProfile() {
     if (LEGACY_IDENTITY.titles.has(next.job_title) && next.company === LEGACY_IDENTITY.company) {
       next.job_title = LEGACY_IDENTITY.answers["Job Title"];
       next.company = LEGACY_IDENTITY.answers["Company / Organization"];
+      changed = true;
+    }
+    // A profile already moved to the interim title takes the current one.
+    if (
+      next.job_title === "Founding Software Engineer" &&
+      next.company === LEGACY_IDENTITY.answers["Company / Organization"]
+    ) {
+      next.job_title = LEGACY_IDENTITY.answers["Job Title"];
       changed = true;
     }
     if (next.personas?.founder?.company === "Stealth Startup" || next.personas?.founder?.company === "Stealth") {
@@ -2379,7 +2387,7 @@ async function migrateLegacyProfile() {
     }
     for (const [question, answer] of Object.entries(LEGACY_IDENTITY.answers)) {
       const current = next.default_answers[question];
-      if (typeof current === "string" && /Eastern Illinois University|Software Engineer & Full Stack Developer/.test(current)) {
+      if (typeof current === "string" && /Eastern Illinois University|Software Engineer & Full Stack Developer|Founding Software Engineer/.test(current)) {
         next.default_answers[question] = answer;
         changed = true;
       }
