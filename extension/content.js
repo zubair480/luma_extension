@@ -1154,7 +1154,47 @@ async function waitForRegistrationUi(maxMs = 1500, stepMs = 100) {
 }
 
 /** Poll for the post-submit outcome instead of a flat 1.8s wait; returns as soon as it is known. */
-async function waitForSubmitOutcome(mode, maxMs = 2500, stepMs = 250) {
+/** Ask Luma (via the background, with the user's session) whether the RSVP went through. */
+async function confirmViaApi(slug, mode, log = () => {}) {
+  if (!slug) return null;
+  const res = await sendMessageWithAbort({ type: "CHECK_RSVP", slug });
+  const rsvp = res?.userRsvpStatus || null;
+  if (!rsvp) {
+    if (res?.status === "unavailable") log("verify", `Luma status check unavailable (${res.error || res.httpStatus || "no response"})`, "warn");
+    return null;
+  }
+  if (rsvp === "going") {
+    return mode === "invite"
+      ? { success: true, status: "invitation_accepted", message: "Invitation accepted (confirmed by Luma)", via: "api" }
+      : { success: true, status: "registered", message: "Registration complete (confirmed by Luma)", via: "api" };
+  }
+  if (rsvp === "pending") {
+    return { success: true, status: "pending_approval", message: "Request submitted — pending approval (confirmed by Luma)", via: "api" };
+  }
+  if (rsvp === "waitlist") {
+    return { success: true, status: "waitlist_joined", message: "Joined waitlist (confirmed by Luma)", via: "api" };
+  }
+  return null;
+}
+
+/** Visible validation messages inside the form after a submit attempt. */
+function visibleValidationErrors() {
+  const root = getFormRoot();
+  if (!root) return [];
+  const out = [];
+  for (const el of root.querySelectorAll('[role="alert"], [aria-invalid="true"], [class*="error" i], [class*="invalid" i]')) {
+    if (!isVisible(el)) continue;
+    const text = cleanLabel(el.getAttribute("aria-label") || el.textContent).slice(0, 80);
+    if (text && !out.includes(text)) out.push(text);
+  }
+  return out;
+}
+
+/**
+ * After a submit: read the page briefly, then ask Luma directly. Page wording differs by host
+ * and mode; the API answer does not, and it is what decides whether to retry the submit.
+ */
+async function waitForSubmitOutcome(mode, maxMs = 2500, stepMs = 250, slug = "", log = () => {}) {
   const started = Date.now();
   while (Date.now() - started < maxMs) {
     const success = isNewRegistrationSuccess(mode);
@@ -1162,7 +1202,9 @@ async function waitForSubmitOutcome(mode, maxMs = 2500, stepMs = 250) {
     if (requiresWallet() || detectExistingRegistration(false)) return null;
     await runAwareSleep(stepMs);
   }
-  return isNewRegistrationSuccess(mode);
+  const fromPage = isNewRegistrationSuccess(mode);
+  if (fromPage) return fromPage;
+  return confirmViaApi(slug, mode, log);
 }
 
 async function clickPrimaryAction(mode = "standard", log = () => {}) {
@@ -1437,11 +1479,21 @@ async function registerOnPage(profile, keepCursor = false, eventMeta = {}) {
     }
 
     log("verify", "Checking registration result…");
-    const success = await waitForSubmitOutcome(mode, 2500);
+    const success = await waitForSubmitOutcome(mode, 2500, 250, eventMeta.slug, log);
     if (success) {
       log("done", success.message || "Registration complete", "success");
       setAgentStatus(success.message || "Done!");
       return { ...success, newAnswers: savedAnswers };
+    }
+
+    const validation = visibleValidationErrors();
+    if (validation.length) {
+      log("verify", `Form reported: ${validation.join(" · ")}`, "warn");
+    } else if (!hasUnfilledFormFields() && attempt >= 1) {
+      // The submit went out, nothing is flagged, and Luma does not show an RSVP: do not keep
+      // resubmitting a form that is not complaining. Leave it for the user to look at.
+      log("verify", "Submitted but Luma shows no RSVP yet and the form reports no error — not retrying", "warn");
+      break;
     }
 
     if (requiresWallet()) {

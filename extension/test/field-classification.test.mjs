@@ -10,6 +10,7 @@ import {
   createStreamingVerifier,
   compareEligibleEvents,
   isPastEvent,
+  lookupRsvpStatus,
 } from "../lib/discovery.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -275,6 +276,19 @@ dateVerifier.finish();
 const dateResult = await dateVerifier.done;
 assert("a past event never reaches the queue", !dateResult.events.some((e) => e.slug === "p-past-event") && dateResult.stats.rejectedPast === 0 && dateResult.stats.rejectedIneligible === 1);
 assert("the upcoming event still does", dateResult.events.some((e) => e.slug === "g-page-event"));
+
+// RSVP confirmation straight from Luma's answer for the event.
+const rsvpFetch = (data) => async () => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ kind: "event", data }) });
+globalThis.fetch = rsvpFetch({ role: "guest", guest_info: { approval_status: "approved" }, registration_availability: "open" });
+assert("approved guest reads as going", (await lookupRsvpStatus("rsvp-going")).userRsvpStatus === "going");
+globalThis.fetch = rsvpFetch({ guest_info: { approval_status: "pending" }, registration_availability: "open" });
+assert("pending approval reads as pending", (await lookupRsvpStatus("rsvp-pending")).userRsvpStatus === "pending");
+globalThis.fetch = rsvpFetch({ guest_info: { approval_status: "waitlist" } });
+assert("waitlisted reads as waitlist", (await lookupRsvpStatus("rsvp-wait")).userRsvpStatus === "waitlist");
+globalThis.fetch = rsvpFetch({ guest_info: {} });
+assert("no guest record reads as null", (await lookupRsvpStatus("rsvp-none")).userRsvpStatus === null);
+globalThis.fetch = async () => ({ ok: false, status: 503, headers: { get: () => null } });
+assert("API failure is reported as unavailable, not as a status", (await lookupRsvpStatus("rsvp-down")).status === "unavailable");
 
 // A cached verdict that has aged into the past is dropped at verification time.
 const staleOk = createStreamingVerifier({ maxResults: 10 });

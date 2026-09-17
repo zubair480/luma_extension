@@ -185,6 +185,16 @@ that asks you to type your name and click **Sign & Accept**. The agent types the
 name and signs. Questions that ask you to type "I agree" or "yes" to acknowledge terms, rules or a
 code of conduct are answered accordingly, and agreement-style dropdowns pick the "I agree" option.
 
+### Confirming a submit
+
+After clicking Register / Request to Join / Join Waitlist, the page is read for a couple of
+seconds and then Luma is asked directly, with your session, whether you are now going, pending
+approval or waitlisted. That answer decides the result regardless of how the host's page words its
+confirmation. If Luma shows no RSVP and the form reports no validation error, the submit is not
+retried; the event is reported as unconfirmed so you can look at the tab. Previously the agent
+re-filled and re-submitted up to five times when it could not match the page wording, which is
+what looked like a long stop after each submit.
+
 ### When the model cannot answer
 
 Free-text answers come from the on-device model. If it is not ready (first-ever use downloads it)

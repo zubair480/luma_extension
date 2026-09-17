@@ -380,6 +380,35 @@ function lookupFromFeedEntry(entry, slug = "") {
   }
 }
 
+/**
+ * The signed-in user's RSVP status for one event, straight from Luma. Used right after a submit:
+ * the page's wording varies by host, the API does not. Goes through the rate-limited lane.
+ */
+export async function lookupRsvpStatus(slug) {
+  if (!slug || !isValidEventSlug(slug)) return { status: "not_event", userRsvpStatus: null };
+  try {
+    const { response } = await fetchLumaWithBackoff(`${URL_LOOKUP_BASE}?url=${encodeURIComponent(slug)}`, {
+      headers: LUMA_HEADERS,
+      credentials: "include",
+    });
+    if (!response.ok) return { status: "unavailable", httpStatus: response.status, userRsvpStatus: null };
+    const payload = await response.json();
+    if (payload?.kind !== "event" || !payload?.data) return { status: "not_event", userRsvpStatus: null };
+    const data = payload.data;
+    return {
+      status: "event",
+      userRsvpStatus: parseUserRsvpStatus({
+        role: data.role,
+        guest_info: data.guest_info || data.guest_data || {},
+      }),
+      registrationAvailability: data.registration_availability || "unknown",
+      waitlistActive: Boolean(data.waitlist_active),
+    };
+  } catch (error) {
+    return { status: "unavailable", error: error?.message || String(error), userRsvpStatus: null };
+  }
+}
+
 async function fetchEventBySlug(slug) {
   const lookup = await fetchEventLookupBySlug(slug);
   return lookup.status === "event" ? lookup.event : null;

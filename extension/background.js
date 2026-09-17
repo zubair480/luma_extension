@@ -1,4 +1,4 @@
-import { createStreamingVerifier, compareEligibleEvents, isPastEvent } from "./lib/discovery.js";
+import { createStreamingVerifier, compareEligibleEvents, isPastEvent, lookupRsvpStatus } from "./lib/discovery.js";
 import { discoverCerebralValleyViaApi } from "./lib/cv-api-discovery.js";
 import {
   discoverFoundersClubEvents,
@@ -2270,6 +2270,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })
       .then((answer) => sendResponse({ answer, ...getLastAnswerSource() }))
       .catch((err) => sendResponse({ answer: null, source: "none", error: err.message }));
+    return true;
+  }
+
+  if (message.type === "CHECK_RSVP") {
+    lookupRsvpStatus(message.slug)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ status: "unavailable", error: err.message, userRsvpStatus: null }));
     return true;
   }
 
