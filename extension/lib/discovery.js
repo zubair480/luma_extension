@@ -409,6 +409,34 @@ export async function lookupRsvpStatus(slug) {
   }
 }
 
+/** An event's registration questions (label, type, required, options) from the /url lookup. */
+export async function lookupEventQuestions(slug) {
+  if (!slug || !isValidEventSlug(slug)) return { status: "not_event", questions: [] };
+  try {
+    const { response } = await fetchLumaWithBackoff(`${URL_LOOKUP_BASE}?url=${encodeURIComponent(slug)}`, {
+      headers: LUMA_HEADERS,
+      credentials: "include",
+    });
+    if (!response.ok) return { status: "unavailable", httpStatus: response.status, questions: [] };
+    const payload = await response.json();
+    const data = payload?.data;
+    if (payload?.kind !== "event" || !data) return { status: "not_event", questions: [] };
+    const raw = data.registration_questions || data.event?.registration_questions || [];
+    return {
+      status: "event",
+      eventTitle: data.event?.name || "",
+      questions: (Array.isArray(raw) ? raw : []).map((q) => ({
+        label: String(q.label || q.question || "").trim(),
+        question_type: String(q.question_type || q.type || "text").toLowerCase(),
+        required: Boolean(q.required),
+        options: Array.isArray(q.options) ? q.options : undefined,
+      })),
+    };
+  } catch (error) {
+    return { status: "unavailable", error: error?.message || String(error), questions: [] };
+  }
+}
+
 async function fetchEventBySlug(slug) {
   const lookup = await fetchEventLookupBySlug(slug);
   return lookup.status === "event" ? lookup.event : null;

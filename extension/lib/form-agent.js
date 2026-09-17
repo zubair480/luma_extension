@@ -327,8 +327,24 @@ async function fillTextFieldAgent(field, profile, eventTitle, log) {
   let value = attrType || labelType !== "custom" ? answerForQuestion(label, profile, attrType || labelType) : null;
 
   if (!value && !attrType && field.answerPromise) {
-    setAgentStatus(`Waiting for AI: ${trimStatus(label, 40)}`);
+    const started = Date.now();
+    let done = false;
+    field.answerPromise.then(
+      () => {
+        done = true;
+      },
+      () => {
+        done = true;
+      }
+    );
+    while (!done) {
+      const seconds = Math.round((Date.now() - started) / 1000);
+      setAgentStatus(`AI is writing "${trimStatus(label, 36)}"… ${seconds}s`);
+      await runAwareSleep(500);
+    }
     value = await field.answerPromise;
+    const took = Math.round((Date.now() - started) / 1000);
+    if (value) log("fill", `AI answered "${trimStatus(label, 40)}" in ${took}s`, "info");
     const provenance = answerSources.get(label);
     if (provenance && provenance.source !== "model" && provenance.source !== "cache") {
       log(

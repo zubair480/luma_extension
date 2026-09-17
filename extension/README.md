@@ -214,6 +214,19 @@ For the best answers on questions you care about, add them under **Saved form an
 panel; those are used word for word. A cloud provider (OpenAI key or a local Ollama model) can be
 configured in the panel and is used before the on-device model when set.
 
+### Answers are written before the form opens
+
+Luma's event lookup lists each event's registration questions. The free-text ones the profile
+cannot answer are sent to the model ahead of time — for the current event while its page loads,
+and for the next event while it preloads during the registration gap — capped at four per event,
+required first. The answers go into the same cache the form fill reads (keyed by the exact
+question text), so by the time a form is on screen its custom answers are usually already there
+and are typed instantly. The log says "Pre-answered N questions for …" when this happened.
+
+While the model is still writing an answer, the status bar on the page ticks ("AI is writing
+'…' 6s") and the log records how long each answer took. While the model is loading before the
+first form, the status bar and the log show the download / load progress every few seconds.
+
 ### When the model cannot answer
 
 Free-text answers come from the on-device model. If it is not ready (first-ever use downloads it)

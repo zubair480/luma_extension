@@ -1,4 +1,11 @@
-import { createStreamingVerifier, compareEligibleEvents, isPastEvent, lookupRsvpStatus } from "./lib/discovery.js";
+import {
+  createStreamingVerifier,
+  compareEligibleEvents,
+  isPastEvent,
+  lookupRsvpStatus,
+  lookupEventQuestions,
+} from "./lib/discovery.js";
+import { pickPrewarmQuestions } from "./lib/question-prewarm.js";
 import { discoverCerebralValleyViaApi } from "./lib/cv-api-discovery.js";
 import { sendToOffscreen } from "./lib/local-llm-bridge.js";
 
@@ -15,6 +22,7 @@ import {
   getLocalModelStatus,
   getLlmConfig,
   getLastAnswerSource,
+  getCachedAnswer,
 } from "./lib/llm-answer.js";
 import {
   buildHistoryExcludeIds,
@@ -616,7 +624,27 @@ async function waitForLocalModelBeforeFirstForm() {
     if (status?.state === "ready") return;
     await logRunStep(RUN_STEPS.FILL, "Waiting for the on-device AI to finish loading before the first form…", "info");
     const started = Date.now();
-    const result = await Promise.race([warmLocalModelForRun(), interruptibleSleep(180000).then(() => null)]);
+    const warm = warmLocalModelForRun();
+    let settled = null;
+    let lastNote = "";
+    let lastNoteAt = 0;
+    warm.then((r) => {
+      settled = r || { ok: false };
+    });
+    while (!settled && Date.now() - started < 180000) {
+      await interruptibleSleep(1000);
+      const now = Date.now();
+      const s = await getLocalModelStatus().catch(() => null);
+      const note = s?.progress || (s?.state ? `state: ${s.state}` : "");
+      const elapsed = Math.round((now - started) / 1000);
+      await setCursorOnTab(tabPool.workTabId, `Loading on-device AI… ${note || ""} (${elapsed}s)`.replace(/\s+\(/, " ("));
+      if (note && (note !== lastNote || now - lastNoteAt > 10000)) {
+        lastNote = note;
+        lastNoteAt = now;
+        await logRunStep(RUN_STEPS.FILL, `On-device AI: ${note} (${elapsed}s)`, "info");
+      }
+    }
+    const result = settled;
     const seconds = Math.round((Date.now() - started) / 1000);
     if (result?.ok) {
       await logRunStep(RUN_STEPS.FILL, `On-device AI ready after ${seconds}s`, "info");
@@ -629,6 +657,57 @@ async function waitForLocalModelBeforeFirstForm() {
     }
   } catch {
     /* never block the run on this */
+  }
+}
+
+/**
+ * Answer an event's free-text questions before its form is on screen. Luma lists the questions
+ * in the event lookup, so they can be generated while the previous form fills or the next page
+ * preloads; the answers land in the same cache the form fill reads, keyed by question text.
+ * Best-effort and never awaited by the run.
+ */
+const prewarmedSlugs = new Set();
+async function prewarmAnswersFor(event, profile) {
+  const slug = event?.slug;
+  if (!slug || prewarmedSlugs.has(slug)) return;
+  prewarmedSlugs.add(slug);
+  try {
+    const config = await getLlmConfig();
+    if (!config.enabled) return;
+    const lookup = await lookupEventQuestions(slug);
+    if (lookup.status !== "event") return;
+    const questions = pickPrewarmQuestions(lookup.questions);
+    if (!questions.length) return;
+
+    const started = Date.now();
+    let generated = 0;
+    let cached = 0;
+    for (const q of questions) {
+      if (runControl.stopRequested) return;
+      if (await getCachedAnswer(q.label)) {
+        cached++;
+        continue;
+      }
+      const answer = await answerRegistrationQuestion({
+        question: q.label,
+        profile,
+        eventTitle: lookup.eventTitle || event.title || "",
+        fieldType: q.type === "text" || q.type === "short-text" || q.type === "short_text" ? "text" : "textarea",
+        qType: "custom",
+      });
+      if (answer && getLastAnswerSource().source === "model") generated++;
+    }
+    if (generated || cached) {
+      const seconds = Math.round((Date.now() - started) / 1000);
+      await logRunStep(
+        RUN_STEPS.FILL,
+        `Pre-answered ${generated} question${generated === 1 ? "" : "s"} for "${(event.title || slug).slice(0, 50)}"${cached ? ` (${cached} already cached)` : ""} in ${seconds}s — ready before the form opens`,
+        "info",
+        { eventSlug: slug, eventTitle: event.title }
+      );
+    }
+  } catch {
+    /* pre-answering is an optimisation only */
   }
 }
 
@@ -1030,6 +1109,7 @@ async function processRun(
         if (!next) return;
         await prefetchEventPage(next);
         notePageLoad();
+        prewarmAnswersFor(next, currentProfile);
       } catch {
         /* a Stop mid-wait is handled by the main loop */
       }
@@ -1188,6 +1268,7 @@ async function processRun(
         await ensureContentScript(tabPool.workTabId);
         await setCursorOnTab(tabPool.workTabId, `Event ${index}: ${event.title}`);
         if (results.length === 0) await waitForLocalModelBeforeFirstForm();
+        prewarmAnswersFor(event, currentProfile);
         preload = schedulePreload();
         const result = await registerInTab(tabPool.workTabId, currentProfile, event);
 
